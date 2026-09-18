@@ -1,0 +1,4 @@
+﻿User-agent: *
+Allow: /
+Sitemap: https://rang17031988-design.github.io/sitemap.xml
+

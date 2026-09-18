@@ -1,0 +1,12 @@
+:root{--bg:#fffaf3;--ink:#2a1a12;--muted:#725b4d;--gold:#f5a623;--dark:#3a2015;--card:#fff;--line:#ead8c9}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif;line-height:1.6}
+a{color:#8a4d00}.wrap{width:min(960px,calc(100% - 32px));margin:auto}.top{position:sticky;top:0;z-index:10;background:rgba(58,32,21,.96);color:#fff}
+.top .wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 0}.brand{font-weight:800;color:#fff;text-decoration:none}.nav{display:flex;gap:14px;flex-wrap:wrap}.nav a{color:#fff;text-decoration:none;font-size:14px}
+.hero{padding:56px 0 28px;background:linear-gradient(135deg,#fff4df,#f7e0b7)}h1{font-size:clamp(32px,6vw,58px);line-height:1.05;margin:0 0 18px}h2{font-size:clamp(24px,3vw,34px);margin-top:38px}h3{margin-top:24px}
+.lead{font-size:20px;color:var(--muted);max-width:760px}.price{font-size:34px;font-weight:900;margin:18px 0}.cta{display:flex;gap:12px;flex-wrap:wrap;margin:22px 0}
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:14px 22px;border-radius:999px;text-decoration:none;font-weight:800}.btn-primary{background:var(--gold);color:#241407}.btn-secondary{border:2px solid #b87921;color:#5c3308;background:#fff}
+main{padding:24px 0 56px}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px;margin:18px 0;box-shadow:0 8px 24px rgba(65,36,18,.06)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.note{border-left:4px solid var(--gold);padding:12px 16px;background:#fff3d7;border-radius:8px}
+.steps li{margin:10px 0}.links{display:flex;flex-wrap:wrap;gap:10px}.links a{background:#fff;border:1px solid var(--line);padding:8px 12px;border-radius:999px;text-decoration:none}
+footer{background:var(--dark);color:#f7e9df;padding:28px 0;font-size:14px}.small{font-size:14px;color:var(--muted)}
+@media(max-width:700px){.grid{grid-template-columns:1fr}.top .wrap{align-items:flex-start;flex-direction:column}.hero{padding-top:36px}.lead{font-size:18px}}
