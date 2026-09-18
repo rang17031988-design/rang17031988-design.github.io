@@ -65,9 +65,29 @@
     (()=> {
       const p=new URLSearchParams(location.search);
       const clean=(v,n)=>(v||"").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,n);
-      const source=clean(p.get("utm_source"),14)||"site";
-      const campaign=clean(p.get("utm_campaign"),24);
-      const payload=["site",source,campaign,"banner"].filter(Boolean).join("_").slice(0,60);
+      const raw=(v,n)=>(v||"").slice(0,n);
+      const rnd=(prefix,n=24)=>{
+        const x=(self.crypto&&crypto.randomUUID)?crypto.randomUUID().replace(/-/g,""):Math.random().toString(36).slice(2)+Date.now().toString(36);
+        return (prefix+x).slice(0,n);
+      };
+      const getOr=(store,key,make)=>{try{let v=store.getItem(key)||"";if(!v){v=make();store.setItem(key,v)}return v}catch(_){return make()}};
+      const source=clean(p.get("utm_source"),40)||"site";
+      const campaign=clean(p.get("utm_campaign"),80);
+      const content=clean(p.get("utm_content"),80);
+      const sid=clean(p.get("sid"),120);
+      const postId=clean(p.get("post_id"),120)||content;
+      const placement="banner";
+      const variant=clean(p.get("variant"),80)||"hero";
+      const isTest=p.get("test")==="1";
+      const journeyId=getOr(localStorage,"yan_journey_v2",()=>rnd("j_",34));
+      const sessionId=getOr(sessionStorage,"yan_session_v2",()=>rnd("ss_",34));
+      const tokenKey="yan_source_token_"+[source,campaign,content,location.pathname].join("_").slice(0,160);
+      const sourceToken=getOr(sessionStorage,tokenKey,()=>rnd("st_",23));
+      const telegramPayload=("s_"+sourceToken).slice(0,64);
+      const funnel="https://sales-funnel-api-v2-production.up.railway.app/event";
+      const base={journey_id:journeyId,session_id:sessionId,source_token:sourceToken,telegram_start_payload:telegramPayload,source_id:source,placement_id:placement,post_id:postId||null,sid:sid||null,utm_source:source,utm_campaign:campaign||null,utm_content:content||null,page_path:location.pathname,variant,is_test:isTest,metadata:{utm_medium:raw(p.get("utm_medium"),80),referrer:raw(document.referrer,500)}};
+      const sendEvent=(event_name,extra={})=>fetch(funnel,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({...base,event_name,...extra}),keepalive:true,cache:"no-store"}).catch(()=>{});
+      sendEvent("LANDING_VIEW");
 
       const attributable=
         (source==="telegram" && /^group_[0-9]{1,18}$/.test(campaign)) ||
@@ -76,26 +96,18 @@
       if(attributable){
         const attrKey="yan_attr_"+source+"_"+campaign;
         let eventId="";
-        try{eventId=sessionStorage.getItem(attrKey)||"";}catch(_){}
-        if(!eventId){
-          const rnd=(self.crypto&&crypto.randomUUID)
-            ? crypto.randomUUID().replace(/-/g,"")
-            : Math.random().toString(36).slice(2)+Date.now().toString(36);
-          eventId=("v_"+Date.now().toString(36)+"_"+rnd).slice(0,90);
-          try{sessionStorage.setItem(attrKey,eventId);}catch(_){}
-        }
-        const hitUrl="https://n8n-production-9378.up.railway.app/webhook/sales-attribution-hit?campaign="+encodeURIComponent(campaign)
-          +"&source="+encodeURIComponent(source)+"&placement=banner&event_id="+encodeURIComponent(eventId);
+        try{eventId=sessionStorage.getItem(attrKey)||""}catch(_){}
+        if(!eventId){eventId=("v_"+Date.now().toString(36)+"_"+rnd("",50)).slice(0,90);try{sessionStorage.setItem(attrKey,eventId)}catch(_){} }
+        const hitUrl="https://n8n-production-9378.up.railway.app/webhook/sales-attribution-hit?campaign="+encodeURIComponent(campaign)+"&source="+encodeURIComponent(source)+"&placement=banner&event_id="+encodeURIComponent(eventId);
         fetch(hitUrl,{method:"GET",mode:"no-cors",cache:"no-store",keepalive:true}).catch(()=>{});
       }
 
       const goal=(name,params={})=>{if(typeof ym==="function")ym(112544007,"reachGoal",name,params)};
       document.querySelectorAll("[data-buy]").forEach(a=>{
-        a.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload);
-        a.addEventListener("click",()=>goal("BUY_CLICK",{source,campaign,placement:"banner"}));
+        a.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(telegramPayload);
+        a.addEventListener("click",()=>{goal("BUY_CLICK",{source,campaign,placement});sendEvent("BUY_CLICK");sendEvent("TELEGRAM_REDIRECT")});
       });
-      document.querySelectorAll("[data-wb]").forEach(a=>a.addEventListener("click",()=>goal("WB_REVIEWS_CLICK",{source,campaign,placement:"banner"})));
-
+      document.querySelectorAll("[data-wb]").forEach(a=>a.addEventListener("click",()=>{goal("WB_REVIEWS_CLICK",{source,campaign,placement});sendEvent("WB_REVIEWS_CLICK")}));
       const stage=document.querySelector(".stage");
       const hero=document.querySelector(".hero");
       const els={
