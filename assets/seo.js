@@ -60,7 +60,10 @@
   document.querySelectorAll('[data-buy]').forEach(function(a){
     a.href='https://t.me/YanHandlesShopBot?start='+encodeURIComponent(telegramPayload);
     a.addEventListener('click',function(){
-      if(typeof ym==='function')ym(112544007,'reachGoal','SEO_BUY_CLICK',{page:location.pathname,source:source,campaign:campaign});
+      if(typeof ym==='function'){
+        ym(112544007,'reachGoal','BUY_CLICK',{page:location.pathname,source:source,campaign:campaign});
+        ym(112544007,'reachGoal','SEO_BUY_CLICK',{page:location.pathname,source:source,campaign:campaign});
+      }
       sendEvent('BUY_CLICK');
       sendEvent('TELEGRAM_REDIRECT');
     });
