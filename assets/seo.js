@@ -3,17 +3,89 @@
   window.ym=window.ym||function(){(ym.a=ym.a||[]).push(arguments)};ym.l=1*new Date();
   var ms=document.createElement('script');ms.async=true;ms.src='https://mc.yandex.ru/metrika/tag.js';document.head.appendChild(ms);
   ym(112544007,'init',{clickmap:true,trackLinks:true,accurateTrackBounce:true,webvisor:true});
-  var p=new URLSearchParams(location.search),clean=function(v,n){return (v||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,n)},raw=function(v,n){return (v||'').slice(0,n)};
+
+  var p=new URLSearchParams(location.search);
+  var clean=function(v,n){return (v||'').replace(/[^a-zA-Z0-9_-]/g,'').slice(0,n)};
+  var raw=function(v,n){return (v||'').slice(0,n)};
   var rnd=function(prefix,n){n=n||24;var x=(self.crypto&&crypto.randomUUID)?crypto.randomUUID().replace(/-/g,''):Math.random().toString(36).slice(2)+Date.now().toString(36);return (prefix+x).slice(0,n)};
   var getOr=function(store,key,make){try{var v=store.getItem(key)||'';if(!v){v=make();store.setItem(key,v)}return v}catch(_){return make()}};
-  var source=clean(p.get('utm_source'),40)||'seo',campaign=clean(p.get('utm_campaign'),80),content=clean(p.get('utm_content'),80),sid=clean(p.get('sid'),120),postId=clean(p.get('post_id'),120)||content;
-  var page=clean(location.pathname.replace(/^\/+|\/+$/g,'').replace(/\//g,'_'),40)||'handle',placement=('seo_'+page).slice(0,120),variant=clean(p.get('variant'),80)||page,isTest=p.get('test')==='1';
-  var journeyId=getOr(localStorage,'yan_journey_v2',function(){return rnd('j_',34)}),sessionId=getOr(sessionStorage,'yan_session_v2',function(){return rnd('ss_',34)}),tokenKey=('yan_source_token_'+[source,campaign,content,location.pathname].join('_')).slice(0,180),sourceToken=getOr(sessionStorage,tokenKey,function(){return rnd('st_',23)}),telegramPayload=('s_'+sourceToken).slice(0,64);
+
+  var source=clean(p.get('utm_source'),40)||'seo';
+  var campaign=clean(p.get('utm_campaign'),80);
+  var content=clean(p.get('utm_content'),80);
+  var sid=clean(p.get('sid'),120);
+  var postId=clean(p.get('post_id'),120)||content;
+  var page=clean(location.pathname.replace(/^\/+|\/+$/g,'').replace(/\//g,'_'),40)||'handle';
+  var placement=('seo_'+page).slice(0,120);
+  var variant=clean(p.get('variant'),80)||page;
+  var testTag=[source,campaign,content,sid].join('_').toLowerCase();
+  var isTest=p.get('test')==='1'||/(^|[_-])(test|prodtest|e2e)($|[_-])/.test(testTag);
+
+  var journeyId=getOr(localStorage,'yan_journey_v2',function(){return rnd('j_',34)});
+  var sessionId=getOr(sessionStorage,'yan_session_v2',function(){return rnd('ss_',34)});
+  var tokenKey=('yan_source_token_'+[source,campaign,content,location.pathname].join('_')).slice(0,180);
+  var sourceToken=getOr(sessionStorage,tokenKey,function(){return rnd('st_',23)});
+  var telegramPayload=('s_'+sourceToken).slice(0,64);
+
   var funnel='https://sales-funnel-api-v2-production.up.railway.app/event';
-  var base={journey_id:journeyId,session_id:sessionId,source_token:sourceToken,telegram_start_payload:telegramPayload,source_id:source,placement_id:placement,post_id:postId||null,sid:sid||null,utm_source:source,utm_campaign:campaign||null,utm_content:content||null,page_path:location.pathname,variant:variant,is_test:isTest,metadata:{utm_medium:raw(p.get('utm_medium'),80),referrer:raw(document.referrer,500)}};
-  var sendEvent=function(event_name,extra){var b=Object.assign({},base,{event_name:event_name},extra||{});fetch(funnel,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b),keepalive:true,cache:'no-store'}).catch(function(){})};
+  var base={
+    journey_id:journeyId,session_id:sessionId,source_token:sourceToken,telegram_start_payload:telegramPayload,
+    source_id:source,placement_id:placement,post_id:postId||null,sid:sid||null,
+    utm_source:source,utm_campaign:campaign||null,utm_content:content||null,
+    page_path:location.pathname,variant:variant,is_test:isTest,
+    metadata:{utm_medium:raw(p.get('utm_medium'),80),referrer:raw(document.referrer,500)}
+  };
+  var sendEvent=function(event_name,extra){
+    var b=Object.assign({},base,{event_name:event_name},extra||{});
+    fetch(funnel,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b),keepalive:true,cache:'no-store'}).catch(function(){});
+  };
+
   sendEvent('LANDING_VIEW');
-  var attributable=(source==='telegram'&&/^group_[0-9]{1,18}$/.test(campaign))||(source==='intent'&&/^intent_[0-9]{1,18}$/.test(campaign))||(source==='b2b'&&/^b2b_[0-9]{1,18}$/.test(campaign));
-  if(attributable){var attrKey='yan_attr_'+source+'_'+campaign,eventId='';try{eventId=sessionStorage.getItem(attrKey)||''}catch(_){}if(!eventId){eventId=('v_'+Date.now().toString(36)+'_'+rnd('',50)).slice(0,90);try{sessionStorage.setItem(attrKey,eventId)}catch(_){}}var hitUrl='https://n8n-production-9378.up.railway.app/webhook/sales-attribution-hit?campaign='+encodeURIComponent(campaign)+'&source='+encodeURIComponent(source)+'&placement='+encodeURIComponent(placement)+'&event_id='+encodeURIComponent(eventId);fetch(hitUrl,{method:'GET',mode:'no-cors',cache:'no-store',keepalive:true}).catch(function(){})}
-  document.querySelectorAll('[data-buy]').forEach(function(a){a.href='https://t.me/YanHandlesShopBot?start='+encodeURIComponent(telegramPayload);a.addEventListener('click',function(){if(typeof ym==='function')ym(112544007,'reachGoal','SEO_BUY_CLICK',{page:location.pathname,source:source,campaign:campaign});sendEvent('BUY_CLICK');sendEvent('TELEGRAM_REDIRECT')})});
+
+  var attributable=
+    (source==='telegram'&&/^group_[0-9]{1,18}$/.test(campaign))||
+    (source==='intent'&&/^intent_[0-9]{1,18}$/.test(campaign))||
+    (source==='b2b'&&/^b2b_[0-9]{1,18}$/.test(campaign));
+  if(attributable){
+    var attrKey='yan_attr_'+source+'_'+campaign,eventId='';
+    try{eventId=sessionStorage.getItem(attrKey)||''}catch(_){}
+    if(!eventId){
+      eventId=('v_'+Date.now().toString(36)+'_'+rnd('',50)).slice(0,90);
+      try{sessionStorage.setItem(attrKey,eventId)}catch(_){}
+    }
+    var hitUrl='https://n8n-production-9378.up.railway.app/webhook/sales-attribution-hit?campaign='+encodeURIComponent(campaign)+'&source='+encodeURIComponent(source)+'&placement='+encodeURIComponent(placement)+'&event_id='+encodeURIComponent(eventId);
+    fetch(hitUrl,{method:'GET',mode:'no-cors',cache:'no-store',keepalive:true}).catch(function(){});
+  }
+
+  document.querySelectorAll('[data-buy]').forEach(function(a){
+    a.href='https://t.me/YanHandlesShopBot?start='+encodeURIComponent(telegramPayload);
+    a.addEventListener('click',function(){
+      if(typeof ym==='function')ym(112544007,'reachGoal','SEO_BUY_CLICK',{page:location.pathname,source:source,campaign:campaign});
+      sendEvent('BUY_CLICK');
+      sendEvent('TELEGRAM_REDIRECT');
+    });
+  });
+
+  document.querySelectorAll('[data-compat-contact]').forEach(function(a){
+    a.href='https://t.me/YanHandlesShopBot?start='+encodeURIComponent(telegramPayload);
+    a.addEventListener('click',function(){
+      if(typeof ym==='function')ym(112544007,'reachGoal','COMPATIBILITY_PHOTO_REQUEST',{page:location.pathname,source:source,campaign:campaign});
+      sendEvent('COMPATIBILITY_PHOTO_REQUEST',{value_text:'PHOTO_REQUEST'});
+      sendEvent('TELEGRAM_REDIRECT',{value_text:'COMPATIBILITY_PHOTO_REQUEST'});
+    });
+  });
+
+  document.addEventListener('yan:compatibility-check',function(ev){
+    var d=(ev&&ev.detail)||{};
+    var result=clean(String(d.result||'PHOTO_REQUIRED'),80)||'PHOTO_REQUIRED';
+    var rim=clean(String(d.rim_profile||'unknown'),40)||'unknown';
+    var thickness=Number(d.thickness);
+    var extra={
+      value_text:result,
+      value_num:Number.isFinite(thickness)?thickness:null,
+      metadata:Object.assign({},base.metadata,{compatibility_result:result,rim_profile:rim})
+    };
+    if(typeof ym==='function')ym(112544007,'reachGoal','COMPATIBILITY_CHECK',{result:result,rim_profile:rim});
+    sendEvent('COMPATIBILITY_CHECK',extra);
+  });
 })();

@@ -1,7 +1,108 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Совместимость съёмной ручки со сковородой: что проверить</title><meta name="description" content="Как понять, подойдёт ли универсальная съёмная ручка к вашей сковороде или другой посуде. Что влияет на надёжность захвата."><link rel="canonical" href="https://rang17031988-design.github.io/handle/compatibility/">
-<link rel="stylesheet" href="/assets/seo.css"><script src="/assets/seo.js" defer></script>
-<meta property="og:type" content="website"><meta property="og:title" content="Совместимость съёмной ручки со сковородой: что проверить"><meta property="og:description" content="Как понять, подойдёт ли универсальная съёмная ручка к вашей сковороде или другой посуде. Что влияет на надёжность захвата."></head><body><header class="top"><div class="wrap"><a class="brand" href="/">Съёмная ручка для посуды</a><nav class="nav"><a href="/handle/">Гид</a><a href="/handle/compatibility/">Совместимость</a><a href="/handle/wholesale/">Опт</a></nav></div></header>
-<section class="hero"><div class="wrap"><h1>Совместимость съёмной ручки</h1><p class="lead">«Универсальная» означает совместимость с разной подходящей посудой, но не со всеми существующими формами борта.</p><div class="cta"><a class="btn btn-primary" data-buy href="https://t.me/YanHandlesShopBot?start=site_seo_compat_banner">Проверить мою посуду</a></div></div></section>
-<main><div class="wrap"><div class="card"><h2>Пять признаков, которые нужно проверить</h2><ol class="steps"><li>Край посуды доступен для захвата.</li><li>Толщина позволяет механизму закрыться полностью.</li><li>Нет выступа, мешающего прижиму.</li><li>Ручка после фиксации не люфтит и не соскальзывает.</li><li>Захват не приходится удерживать рукой в полуфиксированном положении.</li></ol></div><div class="card"><h2>Почему мы не пишем «подходит ко всем брендам»</h2><p>У разных серий Tefal, Kukmara, Gipfel, Rondell и других производителей может отличаться геометрия. Пока конкретная модель не проверена, корректная формулировка — «нужно проверить совместимость».</p></div><div class="note">Если есть сомнение, пришлите фото края с линейкой. Такой подход лучше, чем покупать по одному только названию модели.</div><div class="links"><a href="/handle/how-to-choose/">Как сделать фото для проверки</a><a href="/handle/">Все материалы</a></div></div></main><footer><div class="wrap">Универсальная съёмная ручка — 800 ₽. Опт от 10 шт. — 720 ₽/шт. Доставка по России. Перед заказом проверьте совместимость.</div></footer></body></html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Совместимость съёмной ручки со сковородой: проверка перед заказом</title>
+  <meta name="description" content="Проверка совместимости съёмной ручки: форма борта, толщина, фото и реальные отзывы покупателей. Не обещаем совместимость без подтверждения.">
+  <link rel="canonical" href="https://rang17031988-design.github.io/handle/compatibility/">
+  <link rel="stylesheet" href="/assets/seo.css">
+  <script src="/assets/seo.js" defer></script>
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Совместимость съёмной ручки: проверка перед заказом">
+  <meta property="og:description" content="Быстрая предварительная проверка и безопасный вариант — отправить фото края посуды перед заказом.">
+</head>
+<body>
+<header class="top"><div class="wrap"><a class="brand" href="/">Съёмная ручка для посуды</a><nav class="nav"><a href="/handle/">Гид</a><a href="/handle/compatibility/">Совместимость</a><a href="/handle/wholesale/">Опт</a></nav></div></header>
+
+<section class="hero"><div class="wrap">
+  <h1>Проверьте совместимость до заказа</h1>
+  <p class="lead">«Универсальная» означает совместимость с разной подходящей посудой, но не со всеми формами борта. Поэтому мы не обещаем «подойдёт всем» без проверки.</p>
+  <div class="cta"><a class="btn btn-primary" data-compat-contact href="https://t.me/YanHandlesShopBot?start=site_seo_compat_photo">Отправить фото края посуды</a></div>
+</div></section>
+
+<main><div class="wrap">
+  <div class="card compat-checker">
+    <h2>Предварительная проверка за 30 секунд</h2>
+    <p class="small">Это не заменяет физическую примерку. Результат показывает, можно ли уверенно продолжать без дополнительной проверки.</p>
+
+    <label class="field"><span>Толщина борта в месте захвата, мм</span>
+      <input id="compat-thickness" type="number" inputmode="decimal" min="0.5" max="20" step="0.1" placeholder="Например, 4.5">
+    </label>
+
+    <label class="field"><span>Форма края в месте захвата</span>
+      <select id="compat-rim">
+        <option value="unknown">Не уверен / не знаю</option>
+        <option value="flat">Ровный доступный борт без мешающего выступа</option>
+        <option value="lip">Есть заметный загиб, буртик или выступ</option>
+      </select>
+    </label>
+
+    <button class="btn btn-primary" id="compat-check" type="button">Проверить</button>
+    <div id="compat-result" class="compat-result" aria-live="polite"></div>
+  </div>
+
+  <div class="card">
+    <h2>Что уже известно из реальных отзывов</h2>
+    <ul class="steps">
+      <li><strong>Есть покупательский опыт 4–5 мм:</strong> один покупатель написал, что ручка подошла к старой сковороде с толщиной борта 4–5 мм. Это наблюдение конкретного покупателя, а не гарантированный рабочий диапазон.</li>
+      <li><strong>Есть успешный опыт со старой чугунной сковородой:</strong> покупатель сообщил, что ручка подошла и держит. Бренд, точная геометрия и толщина не указаны.</li>
+      <li><strong>Есть и отрицательный опыт:</strong> другой покупатель сообщил, что ручка не защёлкивалась на его сковороде, хотя механизм защёлкивал лист бумаги. Значит, одна только исправность механизма не гарантирует совместимость с конкретным бортом.</li>
+    </ul>
+    <div class="note">Пока у нас нет собственного физического измерения минимальной/максимальной толщины зажима и допустимого профиля буртика, эти значения не используются как обещание покупателю.</div>
+  </div>
+
+  <div class="card">
+    <h2>Пять признаков, которые нужно проверить</h2>
+    <ol class="steps">
+      <li>Край посуды доступен для захвата.</li>
+      <li>Механизм закрывается полностью, без удержания рукой.</li>
+      <li>Нет выступа или сильного загиба, мешающего прижиму.</li>
+      <li>После фиксации ручка не люфтит и не соскальзывает.</li>
+      <li>Нагрузка приходится на надёжно зафиксированный зажим, а не на полуоткрытый механизм.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>Если не уверены — отправьте фото</h2>
+    <p>Лучший вариант сейчас — сфотографировать край посуды сбоку в месте, где должна стоять ручка, и приложить линейку или штангенциркуль. Мы не будем подтверждать совместимость только по названию бренда, если конкретная геометрия не проверена.</p>
+    <div class="cta"><a class="btn btn-primary" data-compat-contact href="https://t.me/YanHandlesShopBot?start=site_seo_compat_photo">Отправить фото для проверки</a></div>
+  </div>
+
+  <div class="links"><a href="/handle/how-to-choose/">Как сделать фото для проверки</a><a href="/handle/">Все материалы</a></div>
+</div></main>
+
+<footer><div class="wrap">Съёмная ручка — 800 ₽. Опт от 10 шт. — 720 ₽/шт. Доставка по России. Перед заказом проверьте совместимость.</div></footer>
+
+<script>
+(function(){
+  var btn=document.getElementById('compat-check');
+  if(!btn)return;
+  btn.addEventListener('click',function(){
+    var t=parseFloat(document.getElementById('compat-thickness').value);
+    var rim=document.getElementById('compat-rim').value;
+    var result=document.getElementById('compat-result');
+    var key='PHOTO_REQUIRED',html='';
+
+    if(rim==='lip'){
+      key='RIM_LIP_PHOTO_REQUIRED';
+      html='<strong>Результат: нужна проверка по фото.</strong><br>Заметный загиб или буртик может мешать полному прижиму. Без физически подтверждённых размеров мы не будем обещать, что ручка подойдёт.';
+    }else if(Number.isFinite(t) && t>=4 && t<=5 && rim==='flat'){
+      key='CUSTOMER_REPORTED_4_5_PHOTO_REQUIRED';
+      html='<strong>Результат: есть положительный покупательский опыт, но нужна проверка.</strong><br>В отзыве Wildberries есть пример успешной посадки на борт 4–5 мм. Это не гарантированный диапазон: форма края тоже важна. Отправьте фото перед заказом.';
+    }else if(Number.isFinite(t)){
+      key='THICKNESS_UNVERIFIED_PHOTO_REQUIRED';
+      html='<strong>Результат: пока нельзя подтвердить совместимость по одной толщине.</strong><br>Для '+t.toFixed(1)+' мм у нас нет собственного физически подтверждённого диапазона. Отправьте фото края посуды.';
+    }else{
+      key='PHOTO_REQUIRED';
+      html='<strong>Результат: не уверен — отправьте фото.</strong><br>Без толщины и понятной геометрии края надёжно подтвердить совместимость нельзя.';
+    }
+
+    result.innerHTML=html;
+    result.classList.add('show');
+    document.dispatchEvent(new CustomEvent('yan:compatibility-check',{detail:{result:key,thickness:Number.isFinite(t)?t:null,rim_profile:rim}}));
+  });
+})();
+</script>
+</body>
+</html>
