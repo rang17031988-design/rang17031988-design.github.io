@@ -78,7 +78,8 @@
       const postId=clean(p.get("post_id"),120)||content;
       const placement="banner";
       const variant=clean(p.get("variant"),80)||"hero";
-      const isTest=p.get("test")==="1";
+      const testTag=[source,campaign,content,sid].join("_").toLowerCase();
+      const isTest=p.get("test")==="1" || /(^|[_-])(test|prodtest|e2e)($|[_-])/.test(testTag);
       const journeyId=getOr(localStorage,"yan_journey_v2",()=>rnd("j_",34));
       const sessionId=getOr(sessionStorage,"yan_session_v2",()=>rnd("ss_",34));
       const tokenKey="yan_source_token_"+[source,campaign,content,location.pathname].join("_").slice(0,160);
