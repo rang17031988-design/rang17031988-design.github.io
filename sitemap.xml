@@ -18,4 +18,5 @@
   <url><loc>https://www.snoved-ai.ru/consent/</loc><changefreq>monthly</changefreq><priority>0.5</priority></url>
   <url><loc>https://www.snoved-ai.ru/contacts/</loc><changefreq>monthly</changefreq><priority>0.5</priority></url>
   <url><loc>https://www.snoved-ai.ru/order/</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>
+  <url><loc>https://www.snoved-ai.ru/product/</loc><lastmod>2026-09-22</lastmod><changefreq>daily</changefreq><priority>1.0</priority></url>
 </urlset>
