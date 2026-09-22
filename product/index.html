@@ -80,6 +80,8 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
  const source=(p.get("utm_source")||"site").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,40);
  const campaign=(p.get("utm_campaign")||"").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,80);
  const content=(p.get("utm_content")||"").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,80);
+ const testTag=[source,campaign,content].join("_").toLowerCase();
+ const isTest=p.get("test")==="1" || /(^|[_-])(test|prodtest|e2e)($|[_-])/.test(testTag);
  const passed=(p.get("source_token")||"").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,50);
  const rnd=()=>((crypto&&crypto.randomUUID)?crypto.randomUUID().replace(/-/g,""):Math.random().toString(36).slice(2)).slice(0,20);
  let sourceToken=passed;
@@ -88,7 +90,7 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
  const journey=(()=>{try{let x=localStorage.getItem("yan_journey_v2")||"";if(!x){x="j_"+rnd();localStorage.setItem("yan_journey_v2",x)}return x}catch(_){return "j_"+rnd()}})();
  const session=(()=>{try{let x=sessionStorage.getItem("yan_session_v2")||"";if(!x){x="ss_"+rnd();sessionStorage.setItem("yan_session_v2",x)}return x}catch(_){return "ss_"+rnd()}})();
  const funnel="https://sales-funnel-api-v2-production.up.railway.app/event";
- const event=(event_name,extra={})=>fetch(funnel,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({journey_id:journey,session_id:session,source_token:sourceToken,source_id:source,placement_id:"product",utm_source:source,utm_campaign:campaign||null,utm_content:content||null,page_path:location.pathname,event_name,...extra}),keepalive:true,cache:"no-store"}).catch(()=>{});
+ const event=(event_name,extra={})=>fetch(funnel,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({journey_id:journey,session_id:session,source_token:sourceToken,source_id:source,placement_id:"product",utm_source:source,utm_campaign:campaign||null,utm_content:content||null,page_path:location.pathname,is_test:isTest,event_name,...extra}),keepalive:true,cache:"no-store"}).catch(()=>{});
  event("PRODUCT_VIEW");
  const q=document.getElementById("qty"), total=document.getElementById("total"), cart=document.getElementById("cart"), cq=document.getElementById("cartQty"), ct=document.getElementById("cartTotal"), checkout=document.getElementById("checkout");
  const OZON_API="https://ozon-delivery-gateway-production.up.railway.app";

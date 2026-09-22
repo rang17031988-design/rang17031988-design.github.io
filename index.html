@@ -164,7 +164,7 @@
 
       const goal=(name,params={})=>{if(typeof ym==="function")ym(112544007,"reachGoal",name,params)};
       document.querySelectorAll("[data-buy]").forEach(a=>{
-        const qp=new URLSearchParams();qp.set("source_token",sourceToken);qp.set("utm_source",source);if(campaign)qp.set("utm_campaign",campaign);if(content)qp.set("utm_content",content);if(sid)qp.set("sid",sid);
+        const qp=new URLSearchParams();qp.set("source_token",sourceToken);qp.set("utm_source",source);if(campaign)qp.set("utm_campaign",campaign);if(content)qp.set("utm_content",content);if(sid)qp.set("sid",sid);if(isTest)qp.set("test","1");
         a.href="/product/?"+qp.toString();a.removeAttribute("target");
         a.addEventListener("click",()=>{goal("BUY_CLICK",{source,campaign,placement});sendEvent("BUY_CLICK");sendEvent("PRODUCT_OPEN")});
       });
