@@ -23,7 +23,7 @@
 .card{padding:28px;position:sticky;top:74px}.eyebrow{font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#8c5d37}.card h1{margin:8px 0 12px;font-size:34px;line-height:1.06}.sub{color:#715e50;line-height:1.5;font-size:15px}.price{font-size:36px;font-weight:900;margin:22px 0 6px}.stock{display:inline-flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:#275c32;background:#edf7ef;border-radius:999px;padding:7px 10px}.dot{width:8px;height:8px;border-radius:50%;background:#3b8b4d}
 .qtyrow{display:flex;align-items:center;gap:12px;margin:22px 0 14px}.qty{display:flex;align-items:center;border:1px solid #d7c8bb;border-radius:13px;overflow:hidden;background:#faf7f3}.qty button{width:44px;height:44px;border:0;background:#efe5dc;font-size:24px;cursor:pointer}.qty input{width:54px;height:44px;border:0;text-align:center;font-size:18px;font-weight:800;background:#fff}.total{font-size:16px;color:#5e4a3c}.total strong{font-size:20px;color:#2b190f}
 .btn{width:100%;border:0;border-radius:14px;padding:15px 18px;font-weight:850;font-size:17px;cursor:pointer;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:8px}.primary{background:#5a2f19;color:#fff;box-shadow:0 10px 24px rgba(90,47,25,.25)}.secondary{margin-top:10px;background:#fff6e6;color:#633716;border:1px solid #e7c79d}.cartbox{display:none;margin-top:16px;padding:16px;border-radius:15px;background:#f4f8f1;border:1px solid #cee1c9}.cartbox.open{display:block}.cartline{display:flex;justify-content:space-between;gap:12px;margin:6px 0}.cartline strong{font-size:18px}.micro{font-size:12px;color:#806d5e;line-height:1.45;margin-top:12px}.badges{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:18px 0}.badge{padding:11px;border-radius:12px;background:#f7f1eb;border:1px solid #eadccf;font-size:13px;line-height:1.35}.badge b{display:block;margin-bottom:3px}
-.info{margin-top:28px;padding:24px}.info h2{margin:0 0 14px}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.fact{background:#f8f4ef;border-radius:14px;padding:14px}.fact b{display:block;margin-bottom:5px}.note{margin-top:16px;padding:14px 16px;border-left:4px solid #c78933;background:#fff7e4;border-radius:9px;line-height:1.5}.links{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.links a{color:#623619;background:#f4ebe2;padding:8px 10px;border-radius:9px;text-decoration:none;font-size:13px}
+.info{margin-top:28px;padding:24px}.info h2{margin:0 0 14px}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.fact{background:#f8f4ef;border-radius:14px;padding:14px}.fact b{display:block;margin-bottom:5px}.note{margin-top:16px;padding:14px 16px;border-left:4px solid #c78933;background:#fff7e4;border-radius:9px;line-height:1.5}.links{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.links a{color:#623619;background:#f4ebe2;padding:8px 10px;border-radius:9px;text-decoration:none;font-size:13px}.delivery-picker{margin:16px 0 4px;padding:14px;border:1px solid #ded2c6;background:#fbf8f4;border-radius:15px}.delivery-picker h3{margin:0 0 7px;font-size:16px}.delivery-picker p{margin:0 0 10px;color:#756153;font-size:13px;line-height:1.4}.pvz-search{display:flex;gap:8px}.pvz-search input{min-width:0;flex:1;border:1px solid #cdbbab;border-radius:11px;padding:11px 12px;font-size:14px;background:#fff}.pvz-search button{border:0;border-radius:11px;padding:11px 13px;background:#1769aa;color:#fff;font-weight:800;cursor:pointer}.pvz-status{margin-top:9px;font-size:12px;color:#7a6658}.pvz-results{display:grid;gap:7px;margin-top:10px;max-height:230px;overflow:auto}.pvz-item{display:block;width:100%;text-align:left;border:1px solid #ddd0c5;border-radius:11px;background:#fff;padding:10px 11px;cursor:pointer;color:#2f1c12}.pvz-item b{display:block;font-size:13px;margin-bottom:3px}.pvz-item span{display:block;font-size:12px;color:#705e51;line-height:1.35}.pvz-selected{display:none;margin-top:10px;padding:10px 11px;border-radius:11px;background:#edf7ef;border:1px solid #c9dfcd;font-size:12px;line-height:1.4}.pvz-selected.open{display:block}
 @media(max-width:820px){.wrap{padding:16px 12px 40px}.product{grid-template-columns:1fr;gap:14px}.card{position:static;padding:20px;border-radius:18px}.photo{border-radius:18px}.card h1{font-size:27px}.price{font-size:32px}.facts{grid-template-columns:1fr}.nav{padding:9px 10px}.nav a{font-size:12px}.badges{grid-template-columns:1fr 1fr}}
 </style>
 <script>
@@ -44,8 +44,16 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
 <div class="price" id="price">800 ₽</div>
 <span class="stock"><span class="dot"></span>Товар доступен к заказу</span>
 <div class="badges">
-<div class="badge"><b>Ozon Доставка</b>Подключаем доставку в удобный ПВЗ.</div>
+<div class="badge"><b>Ozon Доставка</b>ПВЗ Ozon уже доступны для выбора при заказе.</div>
 <div class="badge"><b>CDEK Pay</b>Онлайн-оплата находится на этапе подключения.</div>
+</div>
+<div class="delivery-picker">
+<h3>Выбрать ПВЗ Ozon</h3>
+<p>Введите город, улицу или часть адреса. Выбранный ПВЗ будет привязан к вашему заказу.</p>
+<div class="pvz-search"><input id="ozonQuery" type="search" placeholder="Например: Самара, Московское шоссе" autocomplete="street-address"><button id="ozonSearch" type="button">Найти</button></div>
+<div class="pvz-status" id="ozonStatus"></div>
+<div class="pvz-results" id="ozonResults"></div>
+<div class="pvz-selected" id="ozonSelected"></div>
 </div>
 <div class="qtyrow"><span>Количество:</span><div class="qty"><button type="button" id="minus" aria-label="Уменьшить">−</button><input id="qty" type="number" min="1" max="99" value="1" inputmode="numeric"><button type="button" id="plus" aria-label="Увеличить">+</button></div></div>
 <div class="total">Итого за товар: <strong id="total">800 ₽</strong></div>
@@ -83,12 +91,48 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
  const event=(event_name,extra={})=>fetch(funnel,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({journey_id:journey,session_id:session,source_token:sourceToken,source_id:source,placement_id:"product",utm_source:source,utm_campaign:campaign||null,utm_content:content||null,page_path:location.pathname,event_name,...extra}),keepalive:true,cache:"no-store"}).catch(()=>{});
  event("PRODUCT_VIEW");
  const q=document.getElementById("qty"), total=document.getElementById("total"), cart=document.getElementById("cart"), cq=document.getElementById("cartQty"), ct=document.getElementById("cartTotal"), checkout=document.getElementById("checkout");
+ const OZON_API="https://ozon-delivery-gateway-production.up.railway.app";
+ const ozonQuery=document.getElementById("ozonQuery"), ozonSearch=document.getElementById("ozonSearch"), ozonStatus=document.getElementById("ozonStatus"), ozonResults=document.getElementById("ozonResults"), ozonSelected=document.getElementById("ozonSelected");
+ let selectedPvz=null;
  const calc=()=>{let n=Math.max(1,Math.min(99,parseInt(q.value||"1",10)));q.value=n;const unit=n>=10?720:800;const s=n*unit;total.textContent=s.toLocaleString("ru-RU")+" ₽";cq.textContent=n+" шт.";ct.textContent=s.toLocaleString("ru-RU")+" ₽";return {n,unit,s}};
  document.getElementById("minus").onclick=()=>{q.value=Math.max(1,(parseInt(q.value||"1",10)-1));calc()};
  document.getElementById("plus").onclick=()=>{q.value=Math.min(99,(parseInt(q.value||"1",10)+1));calc()};
  q.addEventListener("change",calc);
- document.getElementById("add").onclick=()=>{const x=calc();cart.classList.add("open");event("ADD_TO_CART",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s}});if(typeof ym==="function")ym(112544007,"reachGoal","ADD_TO_CART",{quantity:x.n,total:x.s})};
- checkout.addEventListener("click",e=>{const x=calc();const payload=("s_"+sourceToken).slice(0,64);checkout.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload);event("CART_CHECKOUT",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s}});if(typeof ym==="function")ym(112544007,"reachGoal","BUY_CLICK",{source,campaign,placement:"product",quantity:x.n,total:x.s})});
+ const esc=t=>String(t||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+ const choosePvz=async(item)=>{
+   const mids=Array.isArray(item.shipment_method_ids)?item.shipment_method_ids:[];
+   if(!mids.length){ozonStatus.textContent="Для этого ПВЗ сейчас нет доступного способа отправки.";return}
+   ozonStatus.textContent="Проверяем доступность ПВЗ…";
+   try{
+     const av=await fetch(OZON_API+"/api/ozon/availability",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({delivery_point_id:item.delivery_point_id,shipment_method_id:mids[0]})});
+     if(!av.ok)throw new Error("availability");
+     const save=await fetch(OZON_API+"/api/ozon/selection",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source_token:sourceToken,delivery_point_id:item.delivery_point_id,shipment_method_id:mids[0],name:item.name||"ПВЗ Ozon",address:item.full_address||""})});
+     if(!save.ok)throw new Error("save");
+     selectedPvz={id:item.delivery_point_id,shipment_method_id:mids[0],name:item.name||"ПВЗ Ozon",address:item.full_address||""};
+     try{sessionStorage.setItem("yan_ozon_pvz_"+sourceToken,JSON.stringify(selectedPvz))}catch(_){}
+     ozonSelected.innerHTML="<b>ПВЗ выбран:</b><br>"+esc(selectedPvz.address||selectedPvz.name);
+     ozonSelected.classList.add("open");ozonResults.innerHTML="";ozonStatus.textContent="ПВЗ сохранён. Можно добавлять товар в корзину и оформлять заказ.";
+     event("OZON_PVZ_SELECTED",{metadata:{delivery_point_id:selectedPvz.id,shipment_method_id:selectedPvz.shipment_method_id}});
+     if(typeof ym==="function")ym(112544007,"reachGoal","OZON_PVZ_SELECTED",{delivery_point_id:selectedPvz.id});
+   }catch(_){ozonStatus.textContent="Не удалось сохранить ПВЗ. Попробуйте ещё раз или выберите доставку при оформлении заказа."}
+ };
+ const findPvz=async()=>{
+   const query=ozonQuery.value.trim();if(query.length<2){ozonStatus.textContent="Введите минимум 2 символа.";return}
+   ozonStatus.textContent="Ищем ПВЗ Ozon…";ozonResults.innerHTML="";
+   try{
+     const r=await fetch(OZON_API+"/api/ozon/points?query="+encodeURIComponent(query)+"&limit=8");
+     if(!r.ok)throw new Error("search");
+     const data=await r.json(),items=Array.isArray(data.items)?data.items:[];
+     if(!items.length){ozonStatus.textContent="ПВЗ по этому запросу не найден. Уточните город или улицу.";return}
+     ozonStatus.textContent="Найдено: "+(data.count||items.length)+". Выберите удобный ПВЗ:";
+     items.forEach(item=>{const b=document.createElement("button");b.type="button";b.className="pvz-item";b.innerHTML="<b>"+esc(item.name||"ПВЗ Ozon")+"</b><span>"+esc(item.full_address||"Адрес не указан")+"</span>";b.onclick=()=>choosePvz(item);ozonResults.appendChild(b)});
+     event("OZON_PVZ_SEARCH",{metadata:{result_count:data.count||items.length}});
+   }catch(_){ozonStatus.textContent="Сервис Ozon Доставки временно не ответил. Можно продолжить заказ и выбрать доставку в Telegram."}
+ };
+ ozonSearch.onclick=findPvz;ozonQuery.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();findPvz()}});
+ try{const saved=JSON.parse(sessionStorage.getItem("yan_ozon_pvz_"+sourceToken)||"null");if(saved&&saved.id){selectedPvz=saved;ozonSelected.innerHTML="<b>ПВЗ выбран:</b><br>"+esc(saved.address||saved.name);ozonSelected.classList.add("open")}}catch(_){}
+ document.getElementById("add").onclick=()=>{const x=calc();cart.classList.add("open");event("ADD_TO_CART",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s,ozon_delivery_point_id:selectedPvz?selectedPvz.id:null}});if(typeof ym==="function")ym(112544007,"reachGoal","ADD_TO_CART",{quantity:x.n,total:x.s})};
+ checkout.addEventListener("click",e=>{const x=calc();const payload=("s_"+sourceToken).slice(0,64);checkout.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload);event("CART_CHECKOUT",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s,ozon_delivery_point_id:selectedPvz?selectedPvz.id:null}});if(typeof ym==="function")ym(112544007,"reachGoal","BUY_CLICK",{source,campaign,placement:"product",quantity:x.n,total:x.s})});
  calc();
 })();
 </script>
