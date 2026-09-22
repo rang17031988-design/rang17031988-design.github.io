@@ -84,13 +84,17 @@
 
   </style>  <script>
     window.YANDEX_METRIKA_ID=112544007;
-    (function(m,e,t,r,i,k,a){m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
-    m[i].l=1*new Date();k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)})
-    (window,document,"script","https://mc.yandex.ru/metrika/tag.js","ym");
+    (function(m,e,t,r,i,k,a){
+    m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
+    m[i].l=1*new Date();
+    for(var j=0;j<document.scripts.length;j++){if(document.scripts[j].src===r){return;}}
+    k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)
+    })(window,document,"script","https://mc.yandex.ru/metrika/tag.js?id=112544007","ym");
     ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:true,trackLinks:true});
   </script>
 </head>
 <body>
+<noscript><div><img src="https://mc.yandex.ru/watch/112544007" style="position:absolute;left:-9999px" alt="" /></div></noscript>
   <main class="stage" aria-label="&#1057;&#1098;&#1105;&#1084;&#1085;&#1072;&#1103; &#1088;&#1091;&#1095;&#1082;&#1072; &#1076;&#1083;&#1103; &#1089;&#1082;&#1086;&#1074;&#1086;&#1088;&#1086;&#1076;&#1099;">
     <picture>
       <source media="(max-width:767px)" srcset="/assets/mobile-banner-site.png" type="image/png" />
