@@ -1,4 +1,4 @@
-import os, time, uuid, asyncio
+import os, time, uuid, asyncio, json
 from urllib.parse import urljoin, urlsplit
 
 import asyncpg
@@ -41,6 +41,7 @@ _points_cache = []
 _points_cache_at = 0.0
 _points_lock = asyncio.Lock()
 db = None
+_sync_task = None
 
 def _safe_origin(url: str):
     p = urlsplit(url)
@@ -117,7 +118,7 @@ async def _load_all_points(force=False):
         summaries = []
         cursor = None
         seen = set()
-        for _ in range(1000):
+        for _ in range(60):
             page = await _ozon_post("/v1/delivery-point/list", {"pagination": {"cursor": cursor, "limit": 100}})
             rows = page.get("delivery_points") or []
             for row in rows:
@@ -156,6 +157,146 @@ async def _load_all_points(force=False):
         _points_cache = details
         _points_cache_at = time.time()
         return details
+
+
+def _json_value(v, default):
+    if v is None:
+        return default
+    if isinstance(v, (list, dict)):
+        return v
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return default
+    return default
+
+def _cache_row_to_point(row):
+    return {
+        "delivery_point_id": row["delivery_point_id"],
+        "shipment_method_ids": _json_value(row["shipment_method_ids"], []),
+        "name": row["point_name"] or "ПВЗ Ozon",
+        "full_address": row["point_address"] or "",
+        "type": row["point_type"] or "",
+        "latitude": row["latitude"],
+        "longitude": row["longitude"],
+        "storage_period_days": row["storage_period_days"],
+        "schedule": _json_value(row["schedule"], []),
+    }
+
+async def _sync_one_catalog_page(cursor):
+    page = await _ozon_post("/v1/delivery-point/list", {"pagination": {"cursor": cursor, "limit": 100}})
+    summaries = page.get("delivery_points") or []
+    ids = []
+    method_map = {}
+    for row in summaries:
+        pid = row.get("delivery_point_id")
+        mids = row.get("shipment_method_ids") or []
+        if isinstance(mids, int):
+            mids = [mids]
+        if isinstance(pid, int):
+            ids.append(pid)
+            method_map[pid] = [int(x) for x in mids if isinstance(x, int)]
+
+    if ids:
+        info = await _ozon_post("/v1/delivery-point/info", {"delivery_point_ids": ids})
+        records = []
+        for row in info.get("delivery_points") or []:
+            pid = row.get("delivery_point_id")
+            if not isinstance(pid, int):
+                continue
+            coords = row.get("coordinates") or {}
+            lat = coords.get("latitude")
+            lon = coords.get("longitude")
+            records.append((
+                pid,
+                json.dumps(method_map.get(pid, []), ensure_ascii=False),
+                row.get("name") or "ПВЗ Ozon",
+                row.get("full_address") or "",
+                row.get("type") or "",
+                float(lat) if isinstance(lat, (int, float)) else None,
+                float(lon) if isinstance(lon, (int, float)) else None,
+                row.get("storage_period_days") if isinstance(row.get("storage_period_days"), int) else None,
+                json.dumps(row.get("schedule") or [], ensure_ascii=False),
+                bool(row.get("is_active", True)),
+            ))
+        if records and db:
+            async with db.acquire() as c:
+                await c.executemany("""
+                    INSERT INTO ozon_delivery_points_cache
+                    (delivery_point_id, shipment_method_ids, point_name, point_address, point_type,
+                     latitude, longitude, storage_period_days, schedule, is_active, updated_at)
+                    VALUES ($1,$2::jsonb,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,NOW())
+                    ON CONFLICT (delivery_point_id) DO UPDATE SET
+                      shipment_method_ids=EXCLUDED.shipment_method_ids,
+                      point_name=EXCLUDED.point_name,
+                      point_address=EXCLUDED.point_address,
+                      point_type=EXCLUDED.point_type,
+                      latitude=EXCLUDED.latitude,
+                      longitude=EXCLUDED.longitude,
+                      storage_period_days=EXCLUDED.storage_period_days,
+                      schedule=EXCLUDED.schedule,
+                      is_active=EXCLUDED.is_active,
+                      updated_at=NOW()
+                """, records)
+
+    next_cursor = page.get("next_cursor")
+    if next_cursor == "":
+        next_cursor = None
+    if db:
+        async with db.acquire() as c:
+            await c.execute("""
+                INSERT INTO ozon_delivery_sync_state (id, cursor, complete, updated_at)
+                VALUES (1,$1,$2,NOW())
+                ON CONFLICT (id) DO UPDATE SET cursor=EXCLUDED.cursor, complete=EXCLUDED.complete, updated_at=NOW()
+            """, next_cursor, next_cursor is None)
+    return next_cursor
+
+async def _background_sync_loop():
+    # Build a persistent catalog gradually so map requests never need to load
+    # tens of thousands of Ozon points in one HTTP request.
+    while True:
+        try:
+            if not db or not CLIENT_ID or not CLIENT_SECRET:
+                await asyncio.sleep(60)
+                continue
+            async with db.acquire() as c:
+                state = await c.fetchrow("SELECT cursor, complete, updated_at FROM ozon_delivery_sync_state WHERE id=1")
+            cursor = state["cursor"] if state else None
+            complete = bool(state["complete"]) if state else False
+            updated_at = state["updated_at"] if state else None
+            if complete and updated_at:
+                age = time.time() - updated_at.timestamp()
+                if age < 21600:
+                    await asyncio.sleep(min(1800, max(60, 21600-age)))
+                    continue
+                async with db.acquire() as c:
+                    await c.execute("UPDATE ozon_delivery_sync_state SET cursor=NULL, complete=FALSE, updated_at=NOW() WHERE id=1")
+                cursor = None
+
+            failures = 0
+            while True:
+                try:
+                    next_cursor = await _sync_one_catalog_page(cursor)
+                    failures = 0
+                    cursor = next_cursor
+                    if cursor is None:
+                        break
+                    await asyncio.sleep(0.12)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    failures += 1
+                    if failures >= 6:
+                        await asyncio.sleep(300)
+                        break
+                    await asyncio.sleep(min(30, 2 ** failures))
+            if cursor is None:
+                await asyncio.sleep(21600)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await asyncio.sleep(60)
 
 def _parcel(request_id: int, shipment_method_id: int, cutoff_at=None):
     return {
@@ -201,9 +342,9 @@ class CreateOrderIn(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    global db
+    global db, _sync_task
     if DATABASE_URL:
-        db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
+        db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
         async with db.acquire() as c:
             await c.execute("""
                 CREATE TABLE IF NOT EXISTS ozon_delivery_selections (
@@ -219,29 +360,83 @@ async def startup():
             """)
             await c.execute("ALTER TABLE ozon_delivery_selections ADD COLUMN IF NOT EXISTS selection_type TEXT NOT NULL DEFAULT 'api'")
             await c.execute("ALTER TABLE ozon_delivery_selections ADD COLUMN IF NOT EXISTS manual_text TEXT")
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS ozon_delivery_points_cache (
+                    delivery_point_id BIGINT PRIMARY KEY,
+                    shipment_method_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    point_name TEXT,
+                    point_address TEXT,
+                    point_type TEXT,
+                    latitude DOUBLE PRECISION,
+                    longitude DOUBLE PRECISION,
+                    storage_period_days INTEGER,
+                    schedule JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await c.execute("CREATE INDEX IF NOT EXISTS ozon_points_lat_lon_idx ON ozon_delivery_points_cache(latitude, longitude)")
+            await c.execute("CREATE INDEX IF NOT EXISTS ozon_points_address_idx ON ozon_delivery_points_cache USING gin (to_tsvector('simple', coalesce(point_address,'') || ' ' || coalesce(point_name,'')))")
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS ozon_delivery_sync_state (
+                    id SMALLINT PRIMARY KEY,
+                    cursor TEXT,
+                    complete BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await c.execute("INSERT INTO ozon_delivery_sync_state(id,cursor,complete) VALUES(1,NULL,FALSE) ON CONFLICT(id) DO NOTHING")
+        _sync_task = asyncio.create_task(_background_sync_loop())
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _sync_task
+    if _sync_task:
+        _sync_task.cancel()
+        try:
+            await _sync_task
+        except asyncio.CancelledError:
+            pass
     await _http.aclose()
     if db:
         await db.close()
 
 @app.get("/health")
 async def health():
+    cached = 0
+    sync_complete = False
+    if db:
+        async with db.acquire() as c:
+            cached = await c.fetchval("SELECT COUNT(*) FROM ozon_delivery_points_cache")
+            sync_complete = bool(await c.fetchval("SELECT complete FROM ozon_delivery_sync_state WHERE id=1"))
     return {
         "ok": True,
         "ozon_configured": bool(CLIENT_ID and CLIENT_SECRET),
         "db_configured": bool(DATABASE_URL),
-        "points_cached": len(_points_cache),
+        "points_cached": int(cached or 0),
+        "sync_complete": sync_complete,
     }
 
 @app.get("/api/ozon/points")
 async def points(query: str = Query(min_length=2, max_length=100), limit: int = Query(30, ge=1, le=50)):
-    rows = await _load_all_points()
-    q = " ".join(query.lower().replace("ё", "е").split())
-    def norm(v): return " ".join(str(v or "").lower().replace("ё", "е").split())
-    found = [x for x in rows if q in norm(x["full_address"]) or q in norm(x["name"])]
-    return {"query": query, "count": len(found), "items": found[:limit]}
+    if not db:
+        raise HTTPException(503, "Database is not configured")
+    q = " ".join(query.split())
+    like = "%" + q + "%"
+    async with db.acquire() as c:
+        count = await c.fetchval("""
+            SELECT COUNT(*) FROM ozon_delivery_points_cache
+            WHERE is_active=TRUE AND (point_address ILIKE $1 OR point_name ILIKE $1)
+        """, like)
+        rows = await c.fetch("""
+            SELECT delivery_point_id, shipment_method_ids, point_name, point_address, point_type,
+                   latitude, longitude, storage_period_days, schedule
+            FROM ozon_delivery_points_cache
+            WHERE is_active=TRUE AND (point_address ILIKE $1 OR point_name ILIKE $1)
+            ORDER BY updated_at DESC
+            LIMIT $2
+        """, like, limit)
+    return {"query": query, "count": int(count or 0), "items": [_cache_row_to_point(r) for r in rows]}
 
 
 @app.get("/api/ozon/map-points")
@@ -254,42 +449,43 @@ async def map_points(
 ):
     if north <= south:
         raise HTTPException(400, "Invalid latitude bounds")
-    rows = await _load_all_points()
+    if not db:
+        raise HTTPException(503, "Database is not configured")
     center_lat = (south + north) / 2
     if west <= east:
         center_lon = (west + east) / 2
-        def in_lon(lon): return west <= lon <= east
+        lon_where = "longitude BETWEEN $2 AND $4"
+        args = [south, west, north, east]
     else:
         center_lon = ((west + east + 360) / 2) % 360
         if center_lon > 180:
             center_lon -= 360
-        def in_lon(lon): return lon >= west or lon <= east
-
-    found = []
-    for x in rows:
-        lat = x.get("latitude")
-        lon = x.get("longitude")
-        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
-            continue
-        if south <= lat <= north and in_lon(lon):
-            found.append(x)
-
-    # Stable nearest-to-viewport-center ordering keeps the response useful
-    # even when a large viewport contains more than the limit.
-    found.sort(key=lambda x: (x["latitude"] - center_lat) ** 2 + (x["longitude"] - center_lon) ** 2)
-    items = found[:limit]
-    return {
-        "count": len(found),
-        "returned": len(items),
-        "items": items,
-    }
+        lon_where = "(longitude >= $2 OR longitude <= $4)"
+        args = [south, west, north, east]
+    async with db.acquire() as c:
+        count = await c.fetchval(f"""
+            SELECT COUNT(*) FROM ozon_delivery_points_cache
+            WHERE is_active=TRUE AND latitude BETWEEN $1 AND $3 AND {lon_where}
+        """, *args)
+        rows = await c.fetch(f"""
+            SELECT delivery_point_id, shipment_method_ids, point_name, point_address, point_type,
+                   latitude, longitude, storage_period_days, schedule
+            FROM ozon_delivery_points_cache
+            WHERE is_active=TRUE AND latitude BETWEEN $1 AND $3 AND {lon_where}
+            ORDER BY ((latitude-$5)*(latitude-$5) + (longitude-$6)*(longitude-$6))
+            LIMIT $7
+        """, *args, center_lat, center_lon, limit)
+    return {"count": int(count or 0), "returned": len(rows), "items": [_cache_row_to_point(r) for r in rows]}
 
 @app.post("/api/ozon/refresh-points")
 async def refresh_points(x_internal_key: str | None = Header(default=None)):
     if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
         raise HTTPException(403, "Forbidden")
-    rows = await _load_all_points(force=True)
-    return {"ok": True, "count": len(rows)}
+    if not db:
+        raise HTTPException(503, "Database is not configured")
+    async with db.acquire() as c:
+        await c.execute("UPDATE ozon_delivery_sync_state SET cursor=NULL, complete=FALSE, updated_at=NOW() WHERE id=1")
+    return {"ok": True, "status": "scheduled"}
 
 @app.post("/api/ozon/availability")
 async def availability(body: AvailabilityIn):
