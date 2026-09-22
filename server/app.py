@@ -235,6 +235,47 @@ async def points(query: str = Query(min_length=2, max_length=100), limit: int = 
     found = [x for x in rows if q in norm(x["full_address"]) or q in norm(x["name"])]
     return {"query": query, "count": len(found), "items": found[:limit]}
 
+
+@app.get("/api/ozon/map-points")
+async def map_points(
+    south: float = Query(ge=-90, le=90),
+    west: float = Query(ge=-180, le=180),
+    north: float = Query(ge=-90, le=90),
+    east: float = Query(ge=-180, le=180),
+    limit: int = Query(350, ge=1, le=600),
+):
+    if north <= south:
+        raise HTTPException(400, "Invalid latitude bounds")
+    rows = await _load_all_points()
+    center_lat = (south + north) / 2
+    if west <= east:
+        center_lon = (west + east) / 2
+        def in_lon(lon): return west <= lon <= east
+    else:
+        center_lon = ((west + east + 360) / 2) % 360
+        if center_lon > 180:
+            center_lon -= 360
+        def in_lon(lon): return lon >= west or lon <= east
+
+    found = []
+    for x in rows:
+        lat = x.get("latitude")
+        lon = x.get("longitude")
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            continue
+        if south <= lat <= north and in_lon(lon):
+            found.append(x)
+
+    # Stable nearest-to-viewport-center ordering keeps the response useful
+    # even when a large viewport contains more than the limit.
+    found.sort(key=lambda x: (x["latitude"] - center_lat) ** 2 + (x["longitude"] - center_lon) ** 2)
+    items = found[:limit]
+    return {
+        "count": len(found),
+        "returned": len(items),
+        "items": items,
+    }
+
 @app.post("/api/ozon/refresh-points")
 async def refresh_points(x_internal_key: str | None = Header(default=None)):
     if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
