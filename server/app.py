@@ -178,6 +178,10 @@ class SelectionIn(BaseModel):
     name: str = Field(max_length=200)
     address: str = Field(max_length=500)
 
+class ManualSelectionIn(BaseModel):
+    source_token: str = Field(min_length=8, max_length=80)
+    manual_text: str = Field(min_length=5, max_length=500)
+
 class AvailabilityIn(BaseModel):
     delivery_point_id: int
     shipment_method_id: int
@@ -208,9 +212,13 @@ async def startup():
                     shipment_method_id BIGINT NOT NULL,
                     point_name TEXT,
                     point_address TEXT,
+                    selection_type TEXT NOT NULL DEFAULT 'api',
+                    manual_text TEXT,
                     selected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
+            await c.execute("ALTER TABLE ozon_delivery_selections ADD COLUMN IF NOT EXISTS selection_type TEXT NOT NULL DEFAULT 'api'")
+            await c.execute("ALTER TABLE ozon_delivery_selections ADD COLUMN IF NOT EXISTS manual_text TEXT")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -308,16 +316,39 @@ async def save_selection(body: SelectionIn):
         async with db.acquire() as c:
             await c.execute("""
                 INSERT INTO ozon_delivery_selections
-                (source_token, delivery_point_id, shipment_method_id, point_name, point_address, selected_at)
-                VALUES ($1,$2,$3,$4,$5,NOW())
+                (source_token, delivery_point_id, shipment_method_id, point_name, point_address, selection_type, manual_text, selected_at)
+                VALUES ($1,$2,$3,$4,$5,'api',NULL,NOW())
                 ON CONFLICT (source_token) DO UPDATE SET
                   delivery_point_id=EXCLUDED.delivery_point_id,
                   shipment_method_id=EXCLUDED.shipment_method_id,
                   point_name=EXCLUDED.point_name,
                   point_address=EXCLUDED.point_address,
+                  selection_type='api',
+                  manual_text=NULL,
                   selected_at=NOW()
             """, body.source_token, body.delivery_point_id, body.shipment_method_id, body.name, body.address)
     return {"ok": True}
+
+
+@app.post("/api/ozon/manual-selection")
+async def save_manual_selection(body: ManualSelectionIn):
+    text = " ".join(body.manual_text.split())
+    if db:
+        async with db.acquire() as c:
+            await c.execute("""
+                INSERT INTO ozon_delivery_selections
+                (source_token, delivery_point_id, shipment_method_id, point_name, point_address, selection_type, manual_text, selected_at)
+                VALUES ($1,0,0,'ПВЗ Ozon указан вручную',$2,'manual',$2,NOW())
+                ON CONFLICT (source_token) DO UPDATE SET
+                  delivery_point_id=0,
+                  shipment_method_id=0,
+                  point_name='ПВЗ Ozon указан вручную',
+                  point_address=EXCLUDED.point_address,
+                  selection_type='manual',
+                  manual_text=EXCLUDED.manual_text,
+                  selected_at=NOW()
+            """, body.source_token, text)
+    return {"ok": True, "selection_type": "manual", "manual_text": text}
 
 @app.get("/api/ozon/selection/{source_token}")
 async def get_selection(source_token: str, x_internal_key: str | None = Header(default=None)):
@@ -327,7 +358,7 @@ async def get_selection(source_token: str, x_internal_key: str | None = Header(d
         raise HTTPException(503, "Database is not configured")
     async with db.acquire() as c:
         row = await c.fetchrow("""
-            SELECT delivery_point_id, shipment_method_id, point_name, point_address, selected_at
+            SELECT delivery_point_id, shipment_method_id, point_name, point_address, selection_type, manual_text, selected_at
             FROM ozon_delivery_selections WHERE source_token=$1
         """, source_token)
     return {"item": dict(row) if row else None}
