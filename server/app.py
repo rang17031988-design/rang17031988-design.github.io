@@ -117,7 +117,7 @@ async def _load_all_points(force=False):
         summaries = []
         cursor = None
         seen = set()
-        for _ in range(300):
+        for _ in range(1000):
             page = await _ozon_post("/v1/delivery-point/list", {"pagination": {"cursor": cursor, "limit": 100}})
             rows = page.get("delivery_points") or []
             for row in rows:
