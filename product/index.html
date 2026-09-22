@@ -257,7 +257,7 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
    event("ORDER_FORM_OPEN");
    if(typeof ym==="function")ym(112544007,"reachGoal","ORDER_FORM_OPEN");
  });
- checkoutContinue.addEventListener("click",()=>{
+ checkoutContinue.addEventListener("click",async()=>{
    const x=calc();
    const name=checkoutName.value.trim(), phone=checkoutPhone.value.trim(), email=checkoutEmail.value.trim();
    const phoneOk=/^[+0-9()\- \s]{7,30}$/.test(phone), emailOk=/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -265,11 +265,20 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
    if(!phoneOk){checkoutStatus.textContent="Проверьте номер телефона.";checkoutPhone.focus();return}
    if(!emailOk){checkoutStatus.textContent="Проверьте адрес электронной почты.";checkoutEmail.focus();return}
    if(!checkoutConsent.checked){checkoutStatus.textContent="Нужно подтвердить согласие на обработку персональных данных.";checkoutConsent.focus();return}
-   checkoutStatus.textContent="Данные заполнены. Переходим к подтверждению заказа.";
-   const payload=("s_"+sourceToken).slice(0,64);
-   event("CART_CHECKOUT",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s,ozon_delivery_point_id:selectedPvz?selectedPvz.id:null,ozon_manual_pvz:selectedPvz&&selectedPvz.manual?selectedPvz.address:null,customer_fields_complete:true}});
-   if(typeof ym==="function")ym(112544007,"reachGoal","BUY_CLICK",{source,campaign,placement:"product",quantity:x.n,total:x.s});
-   setTimeout(()=>{window.location.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload)},180);
+   checkoutStatus.textContent="Сохраняем данные заказа…";
+   checkoutContinue.disabled=true;
+   try{
+     const saved=await fetch(OZON_API+"/api/checkout/session",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source_token:sourceToken,full_name:name,phone_number:phone,email,quantity:x.n,unit_price:x.unit,total_amount:x.s})});
+     if(!saved.ok)throw new Error("checkout_session");
+     checkoutStatus.textContent="Данные сохранены. Переходим к подтверждению заказа.";
+     const payload=("s_"+sourceToken).slice(0,64);
+     event("CART_CHECKOUT",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s,ozon_delivery_point_id:selectedPvz?selectedPvz.id:null,ozon_manual_pvz:selectedPvz&&selectedPvz.manual?selectedPvz.address:null,customer_fields_complete:true}});
+     if(typeof ym==="function")ym(112544007,"reachGoal","BUY_CLICK",{source,campaign,placement:"product",quantity:x.n,total:x.s});
+     setTimeout(()=>{window.location.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload)},220);
+   }catch(_){
+     checkoutStatus.textContent="Не удалось сохранить данные заказа. Проверьте интернет и попробуйте ещё раз.";
+     checkoutContinue.disabled=false;
+   }
  });
  calc();
 })();

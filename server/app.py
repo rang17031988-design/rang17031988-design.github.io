@@ -340,6 +340,15 @@ class CreateOrderIn(BaseModel):
     source_token: str | None = None
     order_external_id: str | None = None
 
+class CheckoutSessionIn(BaseModel):
+    source_token: str = Field(min_length=8, max_length=80)
+    full_name: str = Field(min_length=5, max_length=120)
+    phone_number: str = Field(min_length=7, max_length=30)
+    email: str = Field(min_length=5, max_length=160)
+    quantity: int = Field(ge=1, le=99)
+    unit_price: int = Field(ge=1, le=1000000)
+    total_amount: int = Field(ge=1, le=100000000)
+
 @app.on_event("startup")
 async def startup():
     global db, _sync_task
@@ -386,6 +395,22 @@ async def startup():
                 )
             """)
             await c.execute("INSERT INTO ozon_delivery_sync_state(id,cursor,complete) VALUES(1,NULL,FALSE) ON CONFLICT(id) DO NOTHING")
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS site_checkout_sessions (
+                    source_token TEXT PRIMARY KEY,
+                    full_name TEXT NOT NULL,
+                    phone_number TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    unit_price INTEGER NOT NULL,
+                    total_amount INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'FORM_COMPLETE',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await c.execute("CREATE INDEX IF NOT EXISTS site_checkout_sessions_updated_idx ON site_checkout_sessions(updated_at)")
+            await c.execute("DELETE FROM site_checkout_sessions WHERE status='FORM_COMPLETE' AND updated_at < NOW() - INTERVAL '30 days'")
         _sync_task = asyncio.create_task(_background_sync_loop())
 
 @app.on_event("shutdown")
@@ -486,6 +511,50 @@ async def refresh_points(x_internal_key: str | None = Header(default=None)):
     async with db.acquire() as c:
         await c.execute("UPDATE ozon_delivery_sync_state SET cursor=NULL, complete=FALSE, updated_at=NOW() WHERE id=1")
     return {"ok": True, "status": "scheduled"}
+
+
+@app.post("/api/checkout/session")
+async def save_checkout_session(body: CheckoutSessionIn):
+    if not db:
+        raise HTTPException(503, "Database is not configured")
+    name = " ".join(body.full_name.split())
+    phone = " ".join(body.phone_number.split())
+    email = body.email.strip().lower()
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        raise HTTPException(422, "Invalid email")
+    async with db.acquire() as c:
+        await c.execute("""
+            INSERT INTO site_checkout_sessions
+            (source_token, full_name, phone_number, email, quantity, unit_price, total_amount, status, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'FORM_COMPLETE',NOW(),NOW())
+            ON CONFLICT (source_token) DO UPDATE SET
+              full_name=EXCLUDED.full_name,
+              phone_number=EXCLUDED.phone_number,
+              email=EXCLUDED.email,
+              quantity=EXCLUDED.quantity,
+              unit_price=EXCLUDED.unit_price,
+              total_amount=EXCLUDED.total_amount,
+              status='FORM_COMPLETE',
+              updated_at=NOW()
+        """, body.source_token, name, phone, email, body.quantity, body.unit_price, body.total_amount)
+    return {"ok": True, "source_token": body.source_token}
+
+@app.get("/api/checkout/session/{source_token}")
+async def get_checkout_session(source_token: str, x_internal_key: str | None = Header(default=None)):
+    if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
+        raise HTTPException(403, "Forbidden")
+    if not db:
+        raise HTTPException(503, "Database is not configured")
+    async with db.acquire() as c:
+        row = await c.fetchrow("""
+            SELECT source_token, full_name, phone_number, email, quantity, unit_price, total_amount, status, created_at, updated_at
+            FROM site_checkout_sessions WHERE source_token=$1
+        """, source_token)
+        delivery = await c.fetchrow("""
+            SELECT delivery_point_id, shipment_method_id, point_name, point_address, selection_type, manual_text, selected_at
+            FROM ozon_delivery_selections WHERE source_token=$1
+        """, source_token)
+    return {"checkout": dict(row) if row else None, "delivery": dict(delivery) if delivery else None}
 
 @app.post("/api/ozon/availability")
 async def availability(body: AvailabilityIn):
