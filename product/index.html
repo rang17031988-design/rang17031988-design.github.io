@@ -160,7 +160,15 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
      const av=await fetch(OZON_API+"/api/ozon/availability",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({delivery_point_id:item.delivery_point_id,shipment_method_id:mids[0]})});
      if(!av.ok)throw new Error("availability");
      const avData=await av.json();
-     if(Array.isArray(avData.results)&&avData.results[0]&&avData.results[0].error)throw new Error("unavailable");
+     const ozonErr=Array.isArray(avData.results)&&avData.results[0]?avData.results[0].error:null;
+     if(ozonErr){
+       if(ozonErr.code==="same_point_error"){
+         sideStatus.textContent="Этот ПВЗ совпадает с нашим пунктом отгрузки Ozon. Ozon не оформляет доставку из пункта в тот же пункт — выберите соседний ПВЗ.";
+         return;
+       }
+       sideStatus.textContent="Ozon сейчас не подтверждает доставку в этот ПВЗ. Выберите другой пункт.";
+       return;
+     }
      const save=await fetch(OZON_API+"/api/ozon/selection",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source_token:sourceToken,delivery_point_id:item.delivery_point_id,shipment_method_id:mids[0],name:item.name||"ПВЗ Ozon",address:item.full_address||""})});
      if(!save.ok)throw new Error("save");
      selectedPvz={id:item.delivery_point_id,shipment_method_id:mids[0],name:item.name||"ПВЗ Ozon",address:item.full_address||"",latitude:item.latitude,longitude:item.longitude};
