@@ -52,7 +52,8 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
 <div class="eyebrow">В наличии · доставка по России</div>
 <h1>Универсальная съёмная ручка для сковороды</h1>
 <p class="sub">Съёмная ручка для совместимой посуды. Подходит как замена сломанной или потерянной ручки. Перед заказом рекомендуем проверить форму и толщину борта.</p>
-<div class="price" id="price">800 ₽</div>
+<div class="price" id="price">800 ₽/шт.</div>
+<div class="micro" id="priceMode">Розничная цена. От 10 шт. автоматически включится оптовая цена 720 ₽/шт.</div>
 <span class="stock"><span class="dot"></span>Товар доступен к заказу</span>
 <div class="badges">
 <div class="badge"><b>Ozon Доставка</b>Бесплатно для покупателя до выбранного ПВЗ Ozon.</div>
@@ -77,7 +78,8 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
 <button class="btn primary" id="add" type="button">🛒 Добавить в корзину</button>
 <div class="cartbox" id="cart" aria-live="polite">
 <div class="cartline"><span>Съёмная ручка</span><span id="cartQty">1 шт.</span></div>
-<div class="cartline"><span>Цена товара</span><strong id="cartTotal">800 ₽</strong></div>
+<div class="cartline"><span>Цена за 1 шт.</span><span id="cartUnit">800 ₽</span></div>
+<div class="cartline"><span>Итого за товар</span><strong id="cartTotal">800 ₽</strong></div>
 <div class="micro"><b>Доставка Ozon до ПВЗ — бесплатно для покупателя.</b> Стоимость доставки оплачивает продавец.</div>
 <button class="btn secondary" id="checkout" type="button">Оформить заказ</button>
 <div class="checkout-form" id="checkoutForm">
@@ -95,7 +97,7 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
 </section>
 <section class="info">
 <h2>О товаре</h2>
-<div class="facts"><div class="fact"><b>Цена</b>800 ₽ за 1 шт.</div><div class="fact"><b>Доставка</b>Бесплатная доставка Ozon до выбранного ПВЗ по России.</div><div class="fact"><b>Совместимость</b>Зависит от геометрии края посуды; при сомнении пришлите фото.</div></div>
+<div class="facts"><div class="fact"><b>Цена</b>800 ₽/шт.; от 10 шт. — 720 ₽/шт. автоматически.</div><div class="fact"><b>Доставка</b>Бесплатная доставка Ozon до выбранного ПВЗ по России.</div><div class="fact"><b>Совместимость</b>Зависит от геометрии края посуды; при сомнении пришлите фото.</div></div>
 <div class="note"><b>Важно:</b> слово «универсальная» не означает совместимость абсолютно со всей посудой. До оплаты можно проверить совместимость по фото края сковороды.</div>
 <div class="links"><a href="/handle/compatibility/">Проверить совместимость</a><a href="https://www.wildberries.ru/catalog/497049795/detail.aspx" target="_blank" rel="noopener noreferrer">Отзывы Wildberries</a><a href="/offer/">Оферта</a><a href="/privacy/">Политика ПД</a><a href="/consent/">Согласие ПД</a></div>
 </section>
@@ -137,7 +139,7 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
  const funnel="https://sales-funnel-api-v2-production.up.railway.app/event";
  const event=(event_name,extra={})=>fetch(funnel,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({journey_id:journey,session_id:session,source_token:sourceToken,source_id:source,placement_id:"product",utm_source:source,utm_campaign:campaign||null,utm_content:content||null,page_path:location.pathname,is_test:isTest,event_name,...extra}),keepalive:true,cache:"no-store"}).catch(()=>{});
  event("PRODUCT_VIEW");
- const q=document.getElementById("qty"), total=document.getElementById("total"), cart=document.getElementById("cart"), cq=document.getElementById("cartQty"), ct=document.getElementById("cartTotal"), checkout=document.getElementById("checkout");
+ const q=document.getElementById("qty"), priceEl=document.getElementById("price"), priceMode=document.getElementById("priceMode"), total=document.getElementById("total"), cart=document.getElementById("cart"), cq=document.getElementById("cartQty"), cartUnit=document.getElementById("cartUnit"), ct=document.getElementById("cartTotal"), checkout=document.getElementById("checkout");
  const checkoutForm=document.getElementById("checkoutForm"), checkoutName=document.getElementById("checkoutName"), checkoutPhone=document.getElementById("checkoutPhone"), checkoutEmail=document.getElementById("checkoutEmail"), checkoutConsent=document.getElementById("checkoutConsent"), checkoutStatus=document.getElementById("checkoutStatus"), checkoutContinue=document.getElementById("checkoutContinue");
  const OZON_API="https://ozon-delivery-gateway-production.up.railway.app";
  const ozonStatus=document.getElementById("ozonStatus"), ozonSelected=document.getElementById("ozonSelected");
@@ -145,7 +147,7 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
  const modal=document.getElementById("pvzModal"), openMapBtn=document.getElementById("openPvzMap"), closeMapBtn=document.getElementById("pvzClose"), locateBtn=document.getElementById("pvzLocate");
  const listEl=document.getElementById("pvzList"), sideStatus=document.getElementById("pvzSideStatus"), mapTip=document.getElementById("pvzMapTip");
  let selectedPvz=null,map=null,markerLayer=null,mapReady=false,loadTimer=0,lastItems=[],markerById=new Map();
- const calc=()=>{let n=Math.max(1,Math.min(99,parseInt(q.value||"1",10)));q.value=n;const unit=n>=10?720:800;const sum=n*unit;total.textContent=sum.toLocaleString("ru-RU")+" ₽";cq.textContent=n+" шт.";ct.textContent=sum.toLocaleString("ru-RU")+" ₽";return {n,unit,s:sum}};
+ const calc=()=>{let n=Math.max(1,Math.min(99,parseInt(q.value||"1",10)));q.value=n;const wholesale=n>=10;const unit=wholesale?720:800;const sum=n*unit;priceEl.textContent=unit.toLocaleString("ru-RU")+" ₽/шт.";priceMode.textContent=wholesale?"Оптовая цена применена автоматически: скидка 10% при заказе от 10 шт.":"Розничная цена. От 10 шт. автоматически включится оптовая цена 720 ₽/шт.";total.textContent=sum.toLocaleString("ru-RU")+" ₽";cq.textContent=n+" шт.";cartUnit.textContent=unit.toLocaleString("ru-RU")+" ₽";ct.textContent=sum.toLocaleString("ru-RU")+" ₽";return {n,unit,s:sum,wholesale}};
  const esc=t=>String(t||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
  document.getElementById("minus").onclick=()=>{q.value=Math.max(1,(parseInt(q.value||"1",10)-1));calc()};
  document.getElementById("plus").onclick=()=>{q.value=Math.min(99,(parseInt(q.value||"1",10)+1));calc()};
