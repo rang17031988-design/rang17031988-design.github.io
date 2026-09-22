@@ -276,8 +276,10 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
      if(typeof ym==="function")ym(112544007,"reachGoal","BUY_CLICK",{source,campaign,placement:"product",quantity:x.n,total:x.s});
      setTimeout(()=>{window.location.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload)},220);
    }catch(_){
-     checkoutStatus.textContent="Не удалось сохранить данные заказа. Проверьте интернет и попробуйте ещё раз.";
-     checkoutContinue.disabled=false;
+     checkoutStatus.textContent="Не удалось сохранить данные автоматически. Продолжаем оформление в Telegram — данные можно подтвердить там.";
+     event("CHECKOUT_SESSION_SAVE_FAILED");
+     const payload=("s_"+sourceToken).slice(0,64);
+     setTimeout(()=>{window.location.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload)},450);
    }
  });
  calc();
