@@ -69,26 +69,4 @@
     });
   });
 
-  document.querySelectorAll('[data-compat-contact]').forEach(function(a){
-    a.href='https://t.me/YanHandlesShopBot?start='+encodeURIComponent(telegramPayload);
-    a.addEventListener('click',function(){
-      if(typeof ym==='function')ym(112544007,'reachGoal','COMPATIBILITY_PHOTO_REQUEST',{page:location.pathname,source:source,campaign:campaign});
-      sendEvent('COMPATIBILITY_PHOTO_REQUEST',{value_text:'PHOTO_REQUEST'});
-      sendEvent('TELEGRAM_REDIRECT',{value_text:'COMPATIBILITY_PHOTO_REQUEST'});
-    });
-  });
-
-  document.addEventListener('yan:compatibility-check',function(ev){
-    var d=(ev&&ev.detail)||{};
-    var result=clean(String(d.result||'PHOTO_REQUIRED'),80)||'PHOTO_REQUIRED';
-    var rim=clean(String(d.rim_profile||'unknown'),40)||'unknown';
-    var thickness=Number(d.thickness);
-    var extra={
-      value_text:result,
-      value_num:Number.isFinite(thickness)?thickness:null,
-      metadata:Object.assign({},base.metadata,{compatibility_result:result,rim_profile:rim})
-    };
-    if(typeof ym==='function')ym(112544007,'reachGoal','COMPATIBILITY_CHECK',{result:result,rim_profile:rim});
-    sendEvent('COMPATIBILITY_CHECK',extra);
-  });
 })();

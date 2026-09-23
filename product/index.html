@@ -12,7 +12,7 @@
 <meta property="og:description" content="Карточка товара с корзиной и оформлением заказа. Доставка по России.">
 <meta property="og:image" content="https://www.snoved-ai.ru/assets/product.png">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"Product","name":"Универсальная съёмная ручка для сковороды","sku":"497049795","image":"https://www.snoved-ai.ru/assets/product.png","description":"Съёмная ручка для сковородок и другой совместимой посуды. Перед покупкой рекомендуется проверить геометрию борта.","offers":{"@type":"Offer","priceCurrency":"RUB","price":"800","availability":"https://schema.org/InStock","url":"https://www.snoved-ai.ru/product/"}}
+{"@context":"https://schema.org","@type":"Product","name":"Универсальная съёмная ручка для сковороды","sku":"497049795","image":"https://www.snoved-ai.ru/assets/product.png","description":"Универсальная съёмная ручка для сковородок. Удобна для замены сломанной или потерянной ручки и компактного хранения.","offers":{"@type":"Offer","priceCurrency":"RUB","price":"800","availability":"https://schema.org/InStock","url":"https://www.snoved-ai.ru/product/"}}
 </script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <style>
@@ -51,7 +51,7 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
 <div class="card">
 <div class="eyebrow">В наличии · доставка по России</div>
 <h1>Универсальная съёмная ручка для сковороды</h1>
-<p class="sub">Съёмная ручка для совместимой посуды. Подходит как замена сломанной или потерянной ручки. Перед заказом рекомендуем проверить форму и толщину борта.</p>
+<p class="sub">Удобная съёмная ручка для замены сломанной или потерянной ручки. Помогает компактнее хранить посуду и быстро снимать ручку при необходимости.</p>
 <div class="price" id="price">800 ₽/шт.</div>
 <div class="micro" id="priceMode">Розничная цена. От 10 шт. автоматически включится оптовая цена 720 ₽/шт.</div>
 <span class="stock"><span class="dot"></span>Товар доступен к заказу</span>
@@ -97,9 +97,9 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
 </section>
 <section class="info">
 <h2>О товаре</h2>
-<div class="facts"><div class="fact"><b>Цена</b>800 ₽/шт.; от 10 шт. — 720 ₽/шт. автоматически.</div><div class="fact"><b>Доставка</b>Бесплатная доставка Ozon до выбранного ПВЗ по России.</div><div class="fact"><b>Совместимость</b>Зависит от геометрии края посуды; при сомнении пришлите фото.</div></div>
-<div class="note"><b>Важно:</b> слово «универсальная» не означает совместимость абсолютно со всей посудой. До оплаты можно проверить совместимость по фото края сковороды.</div>
-<div class="links"><a href="/handle/compatibility/">Проверить совместимость</a><a href="https://www.wildberries.ru/catalog/497049795/detail.aspx" target="_blank" rel="noopener noreferrer">Отзывы Wildberries</a><a href="/offer/">Оферта</a><a href="/privacy/">Политика ПД</a><a href="/consent/">Согласие ПД</a></div>
+<div class="facts"><div class="fact"><b>Цена</b>800 ₽/шт.; от 10 шт. — 720 ₽/шт. автоматически.</div><div class="fact"><b>Доставка</b>Бесплатная доставка Ozon до выбранного ПВЗ по России.</div><div class="fact"><b>Конструкция</b>Прочный зажимной механизм и удобная съёмная форма.</div></div>
+<div class="note"><b>Важно:</b> перед использованием убедитесь, что механизм полностью закрыт и ручка надёжно зафиксирована.</div>
+<div class="links"><a href="https://www.wildberries.ru/catalog/497049795/detail.aspx" target="_blank" rel="noopener noreferrer">Отзывы Wildberries</a><a href="/offer/">Оферта</a><a href="/privacy/">Политика ПД</a><a href="/consent/">Согласие ПД</a></div>
 </section>
 </main>
 <div class="pvz-modal" id="pvzModal" aria-hidden="true">
@@ -278,7 +278,7 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
    try{
      const saved=await fetch(OZON_API+"/api/checkout/session",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source_token:sourceToken,full_name:name,phone_number:phone,email,quantity:x.n,unit_price:x.unit,total_amount:x.s})});
      if(!saved.ok)throw new Error("checkout_session");
-     checkoutStatus.textContent="Заказ принят. Информация о порядке возврата и 7-дневном сроке для товара надлежащего качества отправляется на ваш e-mail. Переходим к подтверждению заказа.";
+     checkoutStatus.textContent="Данные заказа сохранены. Информация о порядке возврата и 7-дневном сроке для товара надлежащего качества отправляется на ваш e-mail. Переходим к подтверждению заказа.";
      const payload=("s_"+sourceToken).slice(0,64);
      event("CART_CHECKOUT",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s,ozon_delivery_point_id:selectedPvz?selectedPvz.id:null,ozon_manual_pvz:selectedPvz&&selectedPvz.manual?selectedPvz.address:null,customer_fields_complete:true}});
      if(typeof ym==="function")ym(112544007,"reachGoal","BUY_CLICK",{source,campaign,placement:"product",quantity:x.n,total:x.s});

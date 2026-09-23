@@ -134,8 +134,8 @@ def _store(data, context):
     row = _row(token)
     if not row.get("order_notice_sent"):
         text = (
-            "Спасибо за заказ!\n\n"
-            f"Мы получили данные вашего заказа на сумму {total} ₽.\n"
+            "Спасибо!\n\n"
+            f"Мы получили данные для оформления заказа на сумму {total} ₽.\n"
             "После получения товара надлежащего качества вы можете "
             "отказаться от него в течение 7 дней при соблюдении "
             "предусмотренных законом условий.\n\n"
@@ -144,7 +144,7 @@ def _store(data, context):
             f"Подробные условия: {RETURNS_URL}"
         )
         try:
-            _send_email(context, email, "Заказ принят — информация о возврате", text)
+            _send_email(context, email, "Данные заказа получены — информация о возврате", text)
             _execute("""
                 DECLARE $token AS Utf8;
                 UPDATE customer_pii SET order_notice_sent=true,
