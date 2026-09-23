@@ -100,8 +100,8 @@
       <source media="(max-width:767px)" srcset="/assets/mobile-banner-site.png" type="image/png" />
       <img class="hero" src="/assets/banner-site.png" width="1672" height="941" alt="&#1057;&#1098;&#1105;&#1084;&#1085;&#1072;&#1103; &#1088;&#1091;&#1095;&#1082;&#1072; &#1076;&#1083;&#1103; &#1089;&#1082;&#1086;&#1074;&#1086;&#1088;&#1086;&#1076;&#1099; &#8212; 800 &#1088;&#1091;&#1073;&#1083;&#1077;&#1081;, &#1076;&#1086;&#1089;&#1090;&#1072;&#1074;&#1082;&#1072; &#1087;&#1086; &#1056;&#1086;&#1089;&#1089;&#1080;&#1080;" fetchpriority="high" decoding="async" />
     </picture>
-    <a class="hotspot buy-top" data-buy href="https://t.me/YanHandlesShopBot?start=site_banner" target="_blank" rel="noopener" aria-label="&#1050;&#1091;&#1087;&#1080;&#1090;&#1100; &#1089;&#1077;&#1081;&#1095;&#1072;&#1089;"><span>&#1050;&#1091;&#1087;&#1080;&#1090;&#1100; &#1089;&#1077;&#1081;&#1095;&#1072;&#1089;</span></a>
-    <a class="hotspot buy-main" data-buy href="https://t.me/YanHandlesShopBot?start=site_banner" target="_blank" rel="noopener" aria-label="&#1050;&#1091;&#1087;&#1080;&#1090;&#1100; &#1089;&#1098;&#1105;&#1084;&#1085;&#1091;&#1102; &#1088;&#1091;&#1095;&#1082;&#1091; &#1079;&#1072; 800 &#1088;&#1091;&#1073;&#1083;&#1077;&#1081;"><span class="btn-icon" aria-hidden="true">&#128722;</span><span>&#1050;&#1091;&#1087;&#1080;&#1090;&#1100; &#1089;&#1077;&#1081;&#1095;&#1072;&#1089;</span><span class="btn-arrow" aria-hidden="true">&#8250;</span></a>
+    <a class="hotspot buy-top" data-buy href="/product/" target="_blank" rel="noopener" aria-label="&#1050;&#1091;&#1087;&#1080;&#1090;&#1100; &#1089;&#1077;&#1081;&#1095;&#1072;&#1089;"><span>&#1050;&#1091;&#1087;&#1080;&#1090;&#1100; &#1089;&#1077;&#1081;&#1095;&#1072;&#1089;</span></a>
+    <a class="hotspot buy-main" data-buy href="/product/" target="_blank" rel="noopener" aria-label="&#1050;&#1091;&#1087;&#1080;&#1090;&#1100; &#1089;&#1098;&#1105;&#1084;&#1085;&#1091;&#1102; &#1088;&#1091;&#1095;&#1082;&#1091; &#1079;&#1072; 800 &#1088;&#1091;&#1073;&#1083;&#1077;&#1081;"><span class="btn-icon" aria-hidden="true">&#128722;</span><span>&#1050;&#1091;&#1087;&#1080;&#1090;&#1100; &#1089;&#1077;&#1081;&#1095;&#1072;&#1089;</span><span class="btn-arrow" aria-hidden="true">&#8250;</span></a>
     <a class="hotspot reviews" data-wb href="https://www.wildberries.ru/catalog/497049795/detail.aspx" target="_blank" rel="noopener noreferrer" aria-label="&#1054;&#1090;&#1079;&#1099;&#1074;&#1099; &#1085;&#1072; Wildberries"><span class="btn-icon" aria-hidden="true">&#9711;</span><span>&#1054;&#1090;&#1079;&#1099;&#1074;&#1099; &#1085;&#1072; Wildberries</span></a>
     <a class="hotspot ozon-badge" data-ozon href="/delivery/" aria-label="&#1044;&#1086;&#1089;&#1090;&#1072;&#1074;&#1082;&#1072; Ozon &#1074; &#1091;&#1076;&#1086;&#1073;&#1085;&#1099;&#1081; &#1055;&#1042;&#1047;"><span>&#1044;&#1086;&#1089;&#1090;&#1072;&#1074;&#1082;&#1072; Ozon</span></a>
     <a class="hotspot cdek-badge" data-cdek href="/payment/" aria-label="&#1054;&#1087;&#1083;&#1072;&#1090;&#1072; &#1095;&#1077;&#1088;&#1077;&#1079; CDEK Pay"><span>CDEK Pay</span></a>
@@ -172,9 +172,16 @@
 
       const goal=(name,params={})=>{if(typeof ym==="function")ym(112544007,"reachGoal",name,params)};
       document.querySelectorAll("[data-buy]").forEach(a=>{
-        a.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(telegramPayload);
+        const qp=new URLSearchParams();
+        qp.set("source_token",sourceToken);
+        qp.set("utm_source",source);
+        if(campaign)qp.set("utm_campaign",campaign);
+        if(content)qp.set("utm_content",content);
+        if(sid)qp.set("sid",sid);
+        if(isTest)qp.set("test","1");
+        a.href="/product/?"+qp.toString();
         a.removeAttribute("target");
-        a.addEventListener("click",()=>{goal("BUY_CLICK",{source,campaign,placement});sendEvent("BUY_CLICK");sendEvent("TELEGRAM_OPEN")});
+        a.addEventListener("click",()=>{goal("BUY_CLICK",{source,campaign,placement});sendEvent("BUY_CLICK");sendEvent("PRODUCT_OPEN")});
       });
       document.querySelectorAll("[data-wb]").forEach(a=>{
         a.href="https://www.wildberries.ru/catalog/497049795/detail.aspx";
