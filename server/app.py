@@ -455,6 +455,15 @@ async def startup():
             """)
         _sync_task = asyncio.create_task(_background_sync_loop())
 
+    if PII_FUNCTION_URL and PII_INTERNAL_KEY:
+        try:
+            result = await _pii_call("health")
+            print("PII_HEALTH_OK=1 region=" + str(result.get("region") or "unknown"))
+        except Exception as exc:
+            print("PII_HEALTH_OK=0 error=" + type(exc).__name__)
+    else:
+        print("PII_HEALTH_OK=0 error=not_configured")
+
 @app.on_event("shutdown")
 async def shutdown():
     global _sync_task
