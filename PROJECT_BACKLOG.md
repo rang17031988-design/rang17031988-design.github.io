@@ -91,16 +91,6 @@ Status: PREPARED / REAL CREATE DISABLED
 
 ## COMPLETED 2026-09-23
 
-### mobile_real_clickable_buttons
-Status: DONE
-- mobile CTA controls are now real visible HTML elements, not invisible click zones over the banner;
-- "Купить сейчас" is itself the clickable element and opens YanHandlesShopBot, with dynamic source_token/start payload when JavaScript is available and a direct Telegram fallback in HTML;
-- Wildberries reviews, Ozon, CDEK Pay and "Информация покупателю" are also real clickable controls;
-- top mobile controls are constrained to the viewport instead of being allowed to crop off-screen;
-- main CTA/reviews follow the same responsive cover transform as the mobile artwork, so the visible control and its clickable area move together;
-- desktop layout logic remains unchanged;
-- updated markup/CSS/JS is published on both / and /ad/.
-
 ### technical_e2e_without_cdek
 Status: DONE
 - PostgreSQL volume resized from 500 MB to 5 GB after disk-full recovery;
