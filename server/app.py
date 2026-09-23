@@ -494,6 +494,8 @@ async def health():
         "ok": True,
         "ozon_configured": bool(CLIENT_ID and CLIENT_SECRET),
         "db_configured": bool(DATABASE_URL),
+        "pii_configured": bool(PII_FUNCTION_URL and PII_INTERNAL_KEY),
+        "real_ozon_create_enabled": bool(ENABLE_REAL_OZON_CREATE),
         "points_cached": int(cached or 0),
         "sync_complete": sync_complete,
     }

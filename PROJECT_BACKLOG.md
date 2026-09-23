@@ -20,48 +20,65 @@ After CDEK Pay is approved:
 ## IN PROGRESS — root domain without www
 
 ### root_domain_redirect
-Status: IN_PROGRESS
+Status: READY_FOR_FINAL_RAILWAY_DNS_VALUES / DO_NOT_SWITCH_NS_YET
 
 Goal:
 - https://snoved-ai.ru/ -> permanent 301 -> https://www.snoved-ai.ru/;
 - preserve api.snoved-ai.ru, mail and all TXT/MX/SPF/DKIM/DMARC records;
 - Beget VPS is explicitly not used.
-Current:
-- Railway already has both www.snoved-ai.ru and snoved-ai.ru custom domains attached;
-- REG.RU authoritative DNS cannot provide the required apex CNAME/ANAME flattening route;
-- selected no-Beget route: Yandex Cloud DNS public zone with apex ANAME toward Railway, after exporting and recreating every current DNS record;
-- do not switch nameservers until the DNS record set is fully mirrored and verified.
 
-## IN PROGRESS — temporary Russian customer data
+Completed preparation:
+- Railway service handles-mobile-prod keeps www.snoved-ai.ru live and healthy;
+- a transparent Node proxy wrapper is deployed in production: requests with Host=snoved-ai.ru get 301 to https://www.snoved-ai.ru with path/query preserved; all other hosts are proxied to the unchanged site app;
+- production www homepage and /ad/ were re-tested after the wrapper deployment and return HTTP 200;
+- Yandex Cloud DNS public zone snoved-ai.ru is created;
+- current REG.RU records were mirrored into Yandex DNS: www CNAME, api A, SPF, DMARC, Railway www verification TXT, and both Yandex Cloud Postbox DKIM CNAME records;
+- Postbox identity snoved-ai.ru reports VerificationStatus=SUCCESS, VerifiedForSendingStatus=true and DKIM Status=SUCCESS.
+
+Remaining blocker before nameserver cutover:
+- Railway currently returns its fallback 404 when snoved-ai.ru is forced directly to Railway, which confirms the apex custom-domain ownership/routing verification is still incomplete;
+- obtain the exact Railway apex routing target and the exact _railway-verify.snoved-ai.ru TXT verificationToken from the existing custom-domain status;
+- replace/confirm the apex ANAME in Yandex DNS with that exact Railway routing target and add the exact apex verification TXT;
+- only after both records validate, switch REG.RU nameservers to ns1.yandexcloud.net / ns2.yandexcloud.net;
+- do not switch nameservers before this verification step.
+
+## COMPLETED — temporary Russian customer data
 
 ### temporary_pii_ydb
-Status: IMPLEMENTED / DEPLOY QA
+Status: DONE / QA PASSED
 
-Approved policy:
+Implemented and verified:
 - no permanent CRM of customer personal data;
 - full name, phone, email and delivery data are temporary only;
-- Russian Serverless YDB database handles-pii created in ru-central1;
-- Yandex Cloud Function handles-pii-api created with a dedicated service account;
+- Russian Serverless YDB database handles-pii runs in ru-central1;
+- Yandex Cloud Function handles-pii-api runs with a dedicated service account;
+- gateway-to-function authentication was fixed for Yandex Functions and the final health check returns HTTP 200 with region=ru-central1;
+- full QA lifecycle passed: STORE -> GET -> DELIVERED -> GET -> RETURN_OPEN -> GET -> RETURN_CLOSE -> GET(null);
 - while order is active/in transit: expire_at is empty;
 - on DELIVERED: expire_at = delivery time + 7 days;
 - RETURN_OPEN clears expire_at and pauses deletion;
 - RETURN_CLOSED deletes the personal-data row immediately;
 - Railway keeps only technical order/payment/attribution fields, not persistent raw PII;
-- YDB TTL performs automatic background deletion.
+- YDB TTL performs automatic background deletion;
+- temporary postbox.viewer access used for read-only QA was removed after verification.
 
 ### return_email_only
-Status: IMPLEMENTED / DEPLOY QA
+Status: DONE
 - returns are handled manually only through rang17031988@gmail.com;
 - no Telegram return path;
 - no automatic partial refunds;
 - no 30-percent keep-item offer;
 - owner reviews every return individually.
+
 ### return_notices
-Status: IMPLEMENTED / DEPLOY QA
+Status: IMPLEMENTED / POSTBOX VERIFIED
 - after checkout, customer receives return-policy information by email;
 - checkout page also displays the return-policy notice;
-- after delivery status becomes DELIVERED, a second email is sent with the 7-day period;
-- no paper insert in the package.
+- after delivery status becomes DELIVERED, a second email is prepared with the 7-day period;
+- Yandex Cloud Postbox domain identity is verified for sending and DKIM is successful;
+- both DKIM CNAME records are mirrored into the prepared Yandex DNS zone;
+- no paper insert in the package;
+- no live test email was sent during QA.
 
 ### ozon_after_paid_preparation
 Status: PREPARED / REAL CREATE DISABLED
