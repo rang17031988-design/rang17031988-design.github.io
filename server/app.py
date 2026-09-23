@@ -13,6 +13,9 @@ CLIENT_ID = os.getenv("OZON_DELIVERY_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("OZON_DELIVERY_CLIENT_SECRET", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 INTERNAL_KEY = os.getenv("OZON_INTERNAL_KEY", "")
+PII_FUNCTION_URL = os.getenv("PII_FUNCTION_URL", "")
+PII_INTERNAL_KEY = os.getenv("PII_INTERNAL_KEY", "")
+ENABLE_REAL_OZON_CREATE = os.getenv("ENABLE_REAL_OZON_CREATE", "false").strip().lower() in ("1", "true", "yes", "on")
 PRODUCT_PRICE = os.getenv("PRODUCT_PRICE_RUB", "800")
 PRODUCT_WEIGHT_G = int(os.getenv("PRODUCT_WEIGHT_G", "200"))
 PRODUCT_LENGTH_MM = int(os.getenv("PRODUCT_LENGTH_MM", "210"))
@@ -46,6 +49,25 @@ _sync_task = None
 def _safe_origin(url: str):
     p = urlsplit(url)
     return (p.scheme.lower(), p.hostname.lower() if p.hostname else "", p.port or (443 if p.scheme == "https" else 80))
+
+async def _pii_call(action: str, payload: dict | None = None):
+    if not PII_FUNCTION_URL or not PII_INTERNAL_KEY:
+        raise HTTPException(503, "Russian temporary customer-data storage is not configured")
+    body = {"action": action}
+    if payload:
+        body.update(payload)
+    try:
+        r = await _http.post(
+            PII_FUNCTION_URL,
+            json=body,
+            headers={"X-Internal-Key": PII_INTERNAL_KEY, "Content-Type": "application/json"},
+        )
+    except httpx.HTTPError:
+        raise HTTPException(502, "Temporary customer-data storage is unavailable")
+    data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    if r.status_code >= 400 or not data.get("ok"):
+        raise HTTPException(502, "Temporary customer-data storage rejected the request")
+    return data
 
 async def _get_token():
     global _token, _token_exp
@@ -349,6 +371,10 @@ class CheckoutSessionIn(BaseModel):
     unit_price: int = Field(ge=1, le=1000000)
     total_amount: int = Field(ge=1, le=100000000)
 
+class DeliveryStatusIn(BaseModel):
+    status: str = Field(min_length=2, max_length=60)
+    tracking_number: str | None = Field(default=None, max_length=160)
+
 @app.on_event("startup")
 async def startup():
     global db, _sync_task
@@ -398,9 +424,9 @@ async def startup():
             await c.execute("""
                 CREATE TABLE IF NOT EXISTS site_checkout_sessions (
                     source_token TEXT PRIMARY KEY,
-                    full_name TEXT NOT NULL,
-                    phone_number TEXT NOT NULL,
-                    email TEXT NOT NULL,
+                    full_name TEXT,
+                    phone_number TEXT,
+                    email TEXT,
                     quantity INTEGER NOT NULL,
                     unit_price INTEGER NOT NULL,
                     total_amount INTEGER NOT NULL,
@@ -409,8 +435,24 @@ async def startup():
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
+            await c.execute("ALTER TABLE site_checkout_sessions ALTER COLUMN full_name DROP NOT NULL")
+            await c.execute("ALTER TABLE site_checkout_sessions ALTER COLUMN phone_number DROP NOT NULL")
+            await c.execute("ALTER TABLE site_checkout_sessions ALTER COLUMN email DROP NOT NULL")
+            await c.execute("UPDATE site_checkout_sessions SET full_name=NULL, phone_number=NULL, email=NULL WHERE full_name IS NOT NULL OR phone_number IS NOT NULL OR email IS NOT NULL")
             await c.execute("CREATE INDEX IF NOT EXISTS site_checkout_sessions_updated_idx ON site_checkout_sessions(updated_at)")
             await c.execute("DELETE FROM site_checkout_sessions WHERE status='FORM_COMPLETE' AND updated_at < NOW() - INTERVAL '30 days'")
+            await c.execute("""
+                CREATE TABLE IF NOT EXISTS order_fulfillment (
+                    source_token TEXT PRIMARY KEY,
+                    payment_status TEXT NOT NULL DEFAULT 'UNPAID',
+                    ozon_status TEXT,
+                    ozon_order_id TEXT,
+                    ozon_posting_id TEXT,
+                    tracking_number TEXT,
+                    ozon_response JSONB,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
         _sync_task = asyncio.create_task(_background_sync_loop())
 
 @app.on_event("shutdown")
@@ -523,21 +565,37 @@ async def save_checkout_session(body: CheckoutSessionIn):
     if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
         raise HTTPException(422, "Invalid email")
     async with db.acquire() as c:
+        delivery = await c.fetchrow("""
+            SELECT point_name, point_address, selection_type, manual_text
+            FROM ozon_delivery_selections WHERE source_token=$1
+        """, body.source_token)
+    await _pii_call("store_checkout", {
+        "source_token": body.source_token,
+        "full_name": name,
+        "phone_number": phone,
+        "email": email,
+        "quantity": body.quantity,
+        "unit_price": body.unit_price,
+        "total_amount": body.total_amount,
+        "delivery_point_name": (delivery["point_name"] if delivery else "") or "",
+        "delivery_point_address": (delivery["point_address"] if delivery else "") or "",
+    })
+    async with db.acquire() as c:
         await c.execute("""
             INSERT INTO site_checkout_sessions
-            (source_token, full_name, phone_number, email, quantity, unit_price, total_amount, status, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,'FORM_COMPLETE',NOW(),NOW())
+            (source_token, quantity, unit_price, total_amount, status, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,'FORM_COMPLETE',NOW(),NOW())
             ON CONFLICT (source_token) DO UPDATE SET
-              full_name=EXCLUDED.full_name,
-              phone_number=EXCLUDED.phone_number,
-              email=EXCLUDED.email,
+              full_name=NULL,
+              phone_number=NULL,
+              email=NULL,
               quantity=EXCLUDED.quantity,
               unit_price=EXCLUDED.unit_price,
               total_amount=EXCLUDED.total_amount,
               status='FORM_COMPLETE',
               updated_at=NOW()
-        """, body.source_token, name, phone, email, body.quantity, body.unit_price, body.total_amount)
-    return {"ok": True, "source_token": body.source_token}
+        """, body.source_token, body.quantity, body.unit_price, body.total_amount)
+    return {"ok": True, "source_token": body.source_token, "personal_data_storage": "ru-central1-temporary"}
 
 @app.get("/api/checkout/session/{source_token}")
 async def get_checkout_session(source_token: str, x_internal_key: str | None = Header(default=None)):
@@ -547,14 +605,23 @@ async def get_checkout_session(source_token: str, x_internal_key: str | None = H
         raise HTTPException(503, "Database is not configured")
     async with db.acquire() as c:
         row = await c.fetchrow("""
-            SELECT source_token, full_name, phone_number, email, quantity, unit_price, total_amount, status, created_at, updated_at
+            SELECT source_token, quantity, unit_price, total_amount, status, created_at, updated_at
             FROM site_checkout_sessions WHERE source_token=$1
         """, source_token)
         delivery = await c.fetchrow("""
             SELECT delivery_point_id, shipment_method_id, point_name, point_address, selection_type, manual_text, selected_at
             FROM ozon_delivery_selections WHERE source_token=$1
         """, source_token)
-    return {"checkout": dict(row) if row else None, "delivery": dict(delivery) if delivery else None}
+    checkout = dict(row) if row else None
+    if checkout:
+        pii = await _pii_call("get", {"source_token": source_token})
+        customer = pii.get("customer") or {}
+        checkout.update({
+            "full_name": customer.get("full_name"),
+            "phone_number": customer.get("phone_number"),
+            "email": customer.get("email"),
+        })
+    return {"checkout": checkout, "delivery": dict(delivery) if delivery else None}
 
 @app.post("/api/ozon/availability")
 async def availability(body: AvailabilityIn):
@@ -655,3 +722,136 @@ async def create_order(body: CreateOrderIn, x_internal_key: str | None = Header(
     idem = str(uuid.uuid5(uuid.NAMESPACE_URL, "snoved-ozon:" + (body.order_external_id or body.phone_number + ":" + str(body.delivery_point_id))))
     result = await _ozon_post("/v1/order/create", payload, idempotency_key=idem)
     return {"ok": True, "ozon": result}
+
+@app.post("/api/order/{source_token}/paid")
+async def mark_order_paid(source_token: str, x_internal_key: str | None = Header(default=None)):
+    if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
+        raise HTTPException(403, "Forbidden")
+    if not db:
+        raise HTTPException(503, "Database is not configured")
+    async with db.acquire() as c:
+        checkout = await c.fetchrow("""
+            SELECT source_token, quantity, unit_price, total_amount
+            FROM site_checkout_sessions WHERE source_token=$1
+        """, source_token)
+        delivery = await c.fetchrow("""
+            SELECT delivery_point_id, shipment_method_id, point_name, point_address, selection_type
+            FROM ozon_delivery_selections WHERE source_token=$1
+        """, source_token)
+    if not checkout:
+        raise HTTPException(404, "Checkout not found")
+    if not delivery:
+        raise HTTPException(409, "Ozon pickup point is not selected")
+    pii = await _pii_call("get", {"source_token": source_token})
+    customer = pii.get("customer") or {}
+    if not customer.get("phone_number") or not customer.get("full_name"):
+        raise HTTPException(409, "Temporary customer data not found")
+    await _pii_call("set_status", {"source_token": source_token, "status": "PAID"})
+    async with db.acquire() as c:
+        await c.execute("""
+            INSERT INTO order_fulfillment(source_token,payment_status,ozon_status,updated_at)
+            VALUES($1,'PAID','READY_AFTER_PAYMENT',NOW())
+            ON CONFLICT(source_token) DO UPDATE SET
+              payment_status='PAID', updated_at=NOW()
+        """, source_token)
+    if not ENABLE_REAL_OZON_CREATE:
+        return {
+            "ok": True,
+            "status": "PAID_PREPARED",
+            "ozon_create_enabled": False,
+            "message": "Real Ozon order creation stays disabled until CDEK Pay approval."
+        }
+    if int(delivery["delivery_point_id"] or 0) <= 0 or int(delivery["shipment_method_id"] or 0) <= 0:
+        async with db.acquire() as c:
+            await c.execute("""
+                UPDATE order_fulfillment SET ozon_status='MANUAL_PVZ_REQUIRED', updated_at=NOW()
+                WHERE source_token=$1
+            """, source_token)
+        return {"ok": True, "status": "MANUAL_PVZ_REQUIRED", "ozon_created": False}
+    if int(checkout["quantity"] or 1) != 1:
+        async with db.acquire() as c:
+            await c.execute("""
+                UPDATE order_fulfillment SET ozon_status='PACKING_REVIEW_REQUIRED', updated_at=NOW()
+                WHERE source_token=$1
+            """, source_token)
+        return {"ok": True, "status": "PACKING_REVIEW_REQUIRED", "ozon_created": False}
+    order_external_id = "snoved-" + source_token[:48]
+    posting = _parcel(1, int(delivery["shipment_method_id"]))
+    posting["posting_external_id"] = order_external_id + "-1"
+    posting["description"] = "Съёмная ручка для сковороды, 1 шт."
+    posting["declared_value"] = {"amount": str(int(checkout["total_amount"])), "currency_code": "RUB"}
+    payload = {
+        "order_external_id": order_external_id,
+        "recipient": {
+            "phone_number": customer["phone_number"],
+            "full_name": customer["full_name"],
+        },
+        "delivery": {"delivery_point": {"delivery_point_id": int(delivery["delivery_point_id"])}},
+        "postings": [posting],
+    }
+    idem = str(uuid.uuid5(uuid.NAMESPACE_URL, "snoved-paid:" + source_token))
+    result = await _ozon_post("/v1/order/create", payload, idempotency_key=idem)
+    order_id = result.get("order_id") or result.get("id")
+    postings = result.get("postings") or []
+    posting_id = None
+    if isinstance(postings, list) and postings:
+        first = postings[0] if isinstance(postings[0], dict) else {}
+        posting_id = first.get("posting_id") or first.get("posting_number") or first.get("id")
+    async with db.acquire() as c:
+        await c.execute("""
+            UPDATE order_fulfillment
+            SET ozon_status='CREATED', ozon_order_id=$2, ozon_posting_id=$3,
+                ozon_response=$4::jsonb, updated_at=NOW()
+            WHERE source_token=$1
+        """, source_token, str(order_id) if order_id else None,
+             str(posting_id) if posting_id else None,
+             json.dumps(result, ensure_ascii=False))
+    await _pii_call("set_status", {"source_token": source_token, "status": "SHIPPING"})
+    return {"ok": True, "status": "OZON_CREATED", "ozon": result}
+
+@app.post("/api/order/{source_token}/delivery-status")
+async def update_delivery_status(source_token: str, body: DeliveryStatusIn, x_internal_key: str | None = Header(default=None)):
+    if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
+        raise HTTPException(403, "Forbidden")
+    if not db:
+        raise HTTPException(503, "Database is not configured")
+    status = " ".join(body.status.split())[:60]
+    tracking = (body.tracking_number or "").strip()[:160] or None
+    async with db.acquire() as c:
+        await c.execute("""
+            INSERT INTO order_fulfillment(source_token,payment_status,ozon_status,tracking_number,updated_at)
+            VALUES($1,'UNKNOWN',$2,$3,NOW())
+            ON CONFLICT(source_token) DO UPDATE SET
+              ozon_status=EXCLUDED.ozon_status,
+              tracking_number=COALESCE(EXCLUDED.tracking_number,order_fulfillment.tracking_number),
+              updated_at=NOW()
+        """, source_token, status, tracking)
+    normalized = status.lower().replace("-", "_").replace(" ", "_")
+    delivered = normalized in {"delivered","received","получен","выдан","delivered_to_customer","received_by_customer"}
+    if delivered:
+        pii = await _pii_call("mark_delivered", {"source_token": source_token})
+        async with db.acquire() as c:
+            await c.execute("UPDATE site_checkout_sessions SET status='DELIVERED', updated_at=NOW() WHERE source_token=$1", source_token)
+        return {"ok": True, "status": status, "tracking_number": tracking, "pii": pii}
+    await _pii_call("set_status", {"source_token": source_token, "status": "IN_TRANSIT"})
+    return {"ok": True, "status": status, "tracking_number": tracking}
+
+@app.post("/api/order/{source_token}/return-open")
+async def open_return(source_token: str, x_internal_key: str | None = Header(default=None)):
+    if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
+        raise HTTPException(403, "Forbidden")
+    result = await _pii_call("return_open", {"source_token": source_token})
+    if db:
+        async with db.acquire() as c:
+            await c.execute("UPDATE site_checkout_sessions SET status='RETURN_OPEN', updated_at=NOW() WHERE source_token=$1", source_token)
+    return result
+
+@app.post("/api/order/{source_token}/return-close")
+async def close_return(source_token: str, x_internal_key: str | None = Header(default=None)):
+    if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
+        raise HTTPException(403, "Forbidden")
+    result = await _pii_call("return_close", {"source_token": source_token})
+    if db:
+        async with db.acquire() as c:
+            await c.execute("UPDATE site_checkout_sessions SET status='RETURN_CLOSED', updated_at=NOW() WHERE source_token=$1", source_token)
+    return result
