@@ -15,7 +15,7 @@ driver = ydb.Driver(
     credentials=ydb.iam.MetadataUrlCredentials(),
 )
 driver.wait(fail_fast=True, timeout=8)
-pool = ydb.SessionPool(driver)
+pool = ydb.QuerySessionPool(driver)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS customer_pii (
@@ -41,11 +41,8 @@ CREATE TABLE IF NOT EXISTS customer_pii (
 );
 """
 
-def _schema(session):
-    return session.execute_scheme(SCHEMA)
-
 def _ensure_schema():
-    return pool.retry_operation_sync(_schema)
+    return pool.execute_with_retries(SCHEMA)
 
 def _execute(query, params=None):
     return pool.execute_with_retries(query, params or {})
