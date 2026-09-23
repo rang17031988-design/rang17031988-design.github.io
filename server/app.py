@@ -66,7 +66,11 @@ async def _pii_call(action: str, payload: dict | None = None):
         raise HTTPException(502, "Temporary customer-data storage is unavailable")
     data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
     if r.status_code >= 400 or not data.get("ok"):
-        raise HTTPException(502, "Temporary customer-data storage rejected the request")
+        safe_error = str(data.get("error") or "unknown")[:80]
+        raise HTTPException(
+            502,
+            f"Temporary customer-data storage rejected the request: upstream={r.status_code} error={safe_error}",
+        )
     return data
 
 async def _get_token():
@@ -460,7 +464,8 @@ async def startup():
             result = await _pii_call("health")
             print("PII_HEALTH_OK=1 region=" + str(result.get("region") or "unknown"))
         except Exception as exc:
-            print("PII_HEALTH_OK=0 error=" + type(exc).__name__)
+            detail = getattr(exc, "detail", None)
+            print("PII_HEALTH_OK=0 error=" + type(exc).__name__ + " detail=" + str(detail or "")[:160])
     else:
         print("PII_HEALTH_OK=0 error=not_configured")
 
