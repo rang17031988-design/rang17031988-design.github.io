@@ -20,7 +20,7 @@ After CDEK Pay is approved:
 ## IN PROGRESS — root domain without www
 
 ### root_domain_redirect
-Status: DNS_READY / WAITING_REGISTRAR_NS_CUTOVER
+Status: REGISTRAR_NS_CHANGED / WAITING_DNS_PROPAGATION
 
 Goal:
 - https://snoved-ai.ru/ -> permanent 301 -> https://www.snoved-ai.ru/;
@@ -42,10 +42,15 @@ Final DNS preparation completed:
 - direct queries to ns1.yandexcloud.net confirm the apex resolves, the root verification TXT is present, www CNAME is preserved, api A is preserved and both Postbox DKIM records are present;
 - SPF and DMARC TXT records in the prepared Yandex zone were corrected so quoted values are preserved exactly.
 
-Remaining external step:
-- REG.RU is still authoritative (ns1.reg.ru / ns2.reg.ru), so the prepared Yandex zone is not live yet;
-- switch the registrar nameservers to ns1.yandexcloud.net / ns2.yandexcloud.net;
-- after delegation propagates, verify Railway ownership/certificate, https://snoved-ai.ru -> 301 -> https://www.snoved-ai.ru, www, api, SPF, DMARC and DKIM.
+Registrar cutover completed:
+- REG.RU nameservers were changed from ns1.reg.ru / ns2.reg.ru to ns1.yandexcloud.net / ns2.yandexcloud.net;
+- REG.RU confirmed the DNS-server change and warns propagation may take up to 24 hours;
+- immediately after the change, public resolvers still returned the old REG.RU delegation, which is expected during propagation;
+- direct queries to ns1.yandexcloud.net confirm the prepared Yandex zone is serving the Railway apex, www, api, SPF, DMARC, Railway verification TXT and both Postbox DKIM records.
+
+Remaining step:
+- wait for delegation propagation;
+- then verify Railway ownership/certificate, https://snoved-ai.ru -> 301 -> https://www.snoved-ai.ru, www, api, SPF, DMARC and DKIM.
 
 ## COMPLETED — temporary Russian customer data
 
