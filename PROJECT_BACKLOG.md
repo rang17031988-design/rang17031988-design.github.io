@@ -20,7 +20,7 @@ After CDEK Pay is approved:
 ## IN PROGRESS — root domain without www
 
 ### root_domain_redirect
-Status: READY_FOR_FINAL_RAILWAY_DNS_VALUES / DO_NOT_SWITCH_NS_YET
+Status: DNS_READY / WAITING_REGISTRAR_NS_CUTOVER
 
 Goal:
 - https://snoved-ai.ru/ -> permanent 301 -> https://www.snoved-ai.ru/;
@@ -35,12 +35,17 @@ Completed preparation:
 - current REG.RU records were mirrored into Yandex DNS: www CNAME, api A, SPF, DMARC, Railway www verification TXT, and both Yandex Cloud Postbox DKIM CNAME records;
 - Postbox identity snoved-ai.ru reports VerificationStatus=SUCCESS, VerifiedForSendingStatus=true and DKIM Status=SUCCESS.
 
-Remaining blocker before nameserver cutover:
-- Railway currently returns its fallback 404 when snoved-ai.ru is forced directly to Railway, which confirms the apex custom-domain ownership/routing verification is still incomplete;
-- obtain the exact Railway apex routing target and the exact _railway-verify.snoved-ai.ru TXT verificationToken from the existing custom-domain status;
-- replace/confirm the apex ANAME in Yandex DNS with that exact Railway routing target and add the exact apex verification TXT;
-- only after both records validate, switch REG.RU nameservers to ns1.yandexcloud.net / ns2.yandexcloud.net;
-- do not switch nameservers before this verification step.
+Final DNS preparation completed:
+- Railway apex status was inspected directly: required apex target is y89h97ba.up.railway.app and the exact _railway-verify.snoved-ai.ru ownership TXT was obtained;
+- Yandex Cloud DNS apex ANAME was updated to the exact Railway apex target;
+- Railway apex verification TXT was added to Yandex Cloud DNS;
+- direct queries to ns1.yandexcloud.net confirm the apex resolves, the root verification TXT is present, www CNAME is preserved, api A is preserved and both Postbox DKIM records are present;
+- SPF and DMARC TXT records in the prepared Yandex zone were corrected so quoted values are preserved exactly.
+
+Remaining external step:
+- REG.RU is still authoritative (ns1.reg.ru / ns2.reg.ru), so the prepared Yandex zone is not live yet;
+- switch the registrar nameservers to ns1.yandexcloud.net / ns2.yandexcloud.net;
+- after delegation propagates, verify Railway ownership/certificate, https://snoved-ai.ru -> 301 -> https://www.snoved-ai.ru, www, api, SPF, DMARC and DKIM.
 
 ## COMPLETED — temporary Russian customer data
 
@@ -71,14 +76,16 @@ Status: DONE
 - owner reviews every return individually.
 
 ### return_notices
-Status: IMPLEMENTED / POSTBOX VERIFIED
+Status: DONE / LIVE POSTBOX TEST PASSED
 - after checkout, customer receives return-policy information by email;
 - checkout page also displays the return-policy notice;
 - after delivery status becomes DELIVERED, a second email is prepared with the 7-day period;
 - Yandex Cloud Postbox domain identity is verified for sending and DKIM is successful;
 - both DKIM CNAME records are mirrored into the prepared Yandex DNS zone;
-- no paper insert in the package;
-- no live test email was sent during QA.
+- live Postbox delivery was tested successfully from orders@snoved-ai.ru to the project mailbox and the message arrived in Inbox;
+- the checkout email wording was corrected from "Заказ принят" to "Данные заказа получены" so saving contact/order data is not presented as confirmed payment;
+- temporary QA PII rows created by the live email test were deleted immediately after verification;
+- no paper insert in the package.
 
 ### ozon_after_paid_preparation
 Status: PREPARED / REAL CREATE DISABLED
@@ -103,7 +110,25 @@ Status: DONE
 Status: DONE
 - Metrika counter initialization fixed and published;
 - real visits and BUY_CLICK goals confirmed;
+- live browser QA confirmed counter 112544007 loads on /ad/;
+- source_token and Yandex UTM values are preserved into the product URL;
+- funnel requests are emitted to the sales-funnel API;
+- Wildberries review link remains correct;
+- compatibility-related analytics were removed together with the compatibility messaging;
 - test traffic remains separated.
+
+### site_cleanup_mobile_ad_legal
+Status: DONE
+- compatibility wording was removed from the main landing, /ad/, product page and SEO/support pages;
+- the old baked-in compatibility benefit on the banner is visually covered by the neutral "Экономит место" benefit without changing the approved banner layout;
+- /handle/compatibility/ no longer contains compatibility content and redirects the visitor to the product page;
+- compatibility URL was removed from sitemap and compatibility analytics were removed;
+- /ad/ buyer-information content was synchronized with the main landing and old bank-transfer/receipt wording was removed;
+- product/order copy no longer says that the order is accepted before payment confirmation;
+- contacts page states that return requests are accepted by email;
+- local and live HTTP checks passed for the main, ad, product, order, legal and handle pages;
+- mobile browser QA passed at 320, 360, 375, 390, 412 and 430 px with no horizontal page overflow; buyer-info modal opens correctly;
+- production / and /ad/ were visually rechecked after publication.
 
 ### n8n_telegram_grampro_stability
 Status: DONE
