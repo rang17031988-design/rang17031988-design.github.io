@@ -5,11 +5,6 @@ import ydb.iam
 YDB_ENDPOINT = os.environ["YDB_ENDPOINT"]
 YDB_DATABASE = os.environ["YDB_DATABASE"]
 INTERNAL_KEY = os.getenv("INTERNAL_KEY", "")
-if not INTERNAL_KEY:
-    try:
-        from _runtime_secret import INTERNAL_KEY
-    except ImportError:
-        INTERNAL_KEY = ""
 MAIL_FROM = os.getenv("MAIL_FROM", "orders@snoved-ai.ru")
 RETURN_EMAIL = os.getenv("RETURN_EMAIL", "rang17031988@gmail.com")
 RETURNS_URL = os.getenv("RETURNS_URL", "https://www.snoved-ai.ru/returns/")
@@ -251,16 +246,22 @@ _schema_ready = False
 def handler(event, context):
     global _schema_ready
     try:
-        headers = {str(k).lower():str(v) for k,v in (event.get("headers") or {}).items()}
-        if headers.get("x-internal-key") != INTERNAL_KEY:
-            return _response(403, {"ok":False,"error":"forbidden"})
-        if not _schema_ready:
-            _ensure_schema()
-            _schema_ready = True
         raw = event.get("body") or "{}"
         if event.get("isBase64Encoded"):
             raw = base64.b64decode(raw).decode("utf-8")
         data = json.loads(raw) if isinstance(raw, str) else raw
+        headers = {str(k).lower():str(v) for k,v in (event.get("headers") or {}).items()}
+        provided_key = headers.get("x-internal-key", "") or str(data.pop("_internal_key", "") or "")
+        if provided_key != INTERNAL_KEY:
+            print(
+                "PII_AUTH_FAIL key_present=" + str(bool(provided_key)) +
+                " provided_len=" + str(len(provided_key)) +
+                " expected_len=" + str(len(INTERNAL_KEY))
+            )
+            return _response(403, {"ok":False,"error":"forbidden"})
+        if not _schema_ready:
+            _ensure_schema()
+            _schema_ready = True
         action = str(data.get("action") or "")
         if action == "store_checkout":
             result = _store(data, context)

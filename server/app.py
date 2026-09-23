@@ -53,14 +53,14 @@ def _safe_origin(url: str):
 async def _pii_call(action: str, payload: dict | None = None):
     if not PII_FUNCTION_URL or not PII_INTERNAL_KEY:
         raise HTTPException(503, "Russian temporary customer-data storage is not configured")
-    body = {"action": action}
+    body = {"action": action, "_internal_key": PII_INTERNAL_KEY}
     if payload:
         body.update(payload)
     try:
         r = await _http.post(
             PII_FUNCTION_URL,
             json=body,
-            headers={"X-Internal-Key": PII_INTERNAL_KEY, "Content-Type": "application/json"},
+            headers={"Content-Type": "application/json"},
         )
     except httpx.HTTPError:
         raise HTTPException(502, "Temporary customer-data storage is unavailable")
