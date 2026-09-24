@@ -259,6 +259,15 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
  try{const saved=JSON.parse(sessionStorage.getItem("yan_ozon_pvz_"+sourceToken)||"null");if(saved&&(saved.id||saved.manual)){selectedPvz=saved;renderSelected();if(saved.manual)manualInput.value=saved.address||""}}catch(_){}
  document.getElementById("add").onclick=()=>{const x=calc();cart.classList.add("open");event("ADD_TO_CART",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s,ozon_delivery_point_id:selectedPvz?selectedPvz.id:null,ozon_manual_pvz:selectedPvz&&selectedPvz.manual?selectedPvz.address:null}});if(typeof ym==="function")ym(112544007,"reachGoal","ADD_TO_CART",{quantity:x.n,total:x.s})};
  checkout.addEventListener("click",()=>{
+   if(!selectedPvz||(!selectedPvz.id&&!selectedPvz.manual)){
+     checkoutForm.classList.remove("open");
+     checkoutStatus.textContent="";
+     ozonStatus.textContent="Сначала выберите ПВЗ Ozon для доставки.";
+     event("ORDER_PVZ_REQUIRED");
+     if(typeof ym==="function")ym(112544007,"reachGoal","ORDER_PVZ_REQUIRED");
+     if(openMapBtn)setTimeout(()=>openMapBtn.click(),40);
+     return;
+   }
    checkoutForm.classList.add("open");
    checkoutStatus.textContent="";
    setTimeout(()=>checkoutName.focus(),40);
@@ -266,6 +275,13 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
    if(typeof ym==="function")ym(112544007,"reachGoal","ORDER_FORM_OPEN");
  });
  checkoutContinue.addEventListener("click",async()=>{
+   if(!selectedPvz||(!selectedPvz.id&&!selectedPvz.manual)){
+     checkoutForm.classList.remove("open");
+     checkoutStatus.textContent="";
+     ozonStatus.textContent="Сначала выберите ПВЗ Ozon для доставки.";
+     if(openMapBtn)setTimeout(()=>openMapBtn.click(),40);
+     return;
+   }
    const x=calc();
    const name=checkoutName.value.trim(), phone=checkoutPhone.value.trim(), email=checkoutEmail.value.trim();
    const phoneOk=/^[+0-9()\- \s]{7,30}$/.test(phone), emailOk=/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
