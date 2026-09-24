@@ -52,6 +52,18 @@ Remaining step:
 - wait for delegation propagation;
 - then verify Railway ownership/certificate, https://snoved-ai.ru -> 301 -> https://www.snoved-ai.ru, www, api, SPF, DMARC and DKIM.
 
+## RETIRED — legacy api.snoved-ai.ru
+
+### api_subdomain_retired
+Status: RETIRED / NOT USED BY PRODUCTION
+
+Decision 2026-09-24:
+- api.snoved-ai.ru is removed from the active project architecture;
+- the current production site contains no runtime references to api.snoved-ai.ru;
+- Ozon delivery uses the dedicated Railway gateway, analytics use their dedicated Railway services, and n8n uses its own Railway domain;
+- the legacy api.snoved-ai.ru endpoint is therefore not repaired and must not be used for new integrations;
+- to avoid any DNS risk while CDEK Pay is reviewing the live site, the legacy DNS record is left untouched for now and can be physically removed after the review without affecting production.
+
 ## COMPLETED — temporary Russian customer data
 
 ### temporary_pii_ydb
