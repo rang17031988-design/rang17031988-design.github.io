@@ -278,16 +278,15 @@ ym(112544007,"init",{ssr:true,webvisor:true,clickmap:true,accurateTrackBounce:tr
    try{
      const saved=await fetch(OZON_API+"/api/checkout/session",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({source_token:sourceToken,full_name:name,phone_number:phone,email,quantity:x.n,unit_price:x.unit,total_amount:x.s})});
      if(!saved.ok)throw new Error("checkout_session");
-     checkoutStatus.textContent="Данные заказа сохранены. Информация о порядке возврата и 7-дневном сроке для товара надлежащего качества отправляется на ваш e-mail. Переходим к подтверждению заказа.";
-     const payload=("s_"+sourceToken).slice(0,64);
-     event("CART_CHECKOUT",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s,ozon_delivery_point_id:selectedPvz?selectedPvz.id:null,ozon_manual_pvz:selectedPvz&&selectedPvz.manual?selectedPvz.address:null,customer_fields_complete:true}});
+     checkoutStatus.textContent="Ожидаем подключение онлайн-оплаты CDEK Pay.";
+     checkoutContinue.textContent="CDEK Pay подключается";
+     event("CART_CHECKOUT",{metadata:{quantity:x.n,unit_price:x.unit,total:x.s,ozon_delivery_point_id:selectedPvz?selectedPvz.id:null,ozon_manual_pvz:selectedPvz&&selectedPvz.manual?selectedPvz.address:null,customer_fields_complete:true,payment_status:"cdek_pay_pending"}});
      if(typeof ym==="function")ym(112544007,"reachGoal","BUY_CLICK",{source,campaign,placement:"product",quantity:x.n,total:x.s});
-     setTimeout(()=>{window.location.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload)},1500);
    }catch(_){
-     checkoutStatus.textContent="Не удалось сохранить данные автоматически. Продолжаем оформление в Telegram — данные можно подтвердить там.";
-     event("CHECKOUT_SESSION_SAVE_FAILED");
-     const payload=("s_"+sourceToken).slice(0,64);
-     setTimeout(()=>{window.location.href="https://t.me/YanHandlesShopBot?start="+encodeURIComponent(payload)},450);
+     checkoutStatus.textContent="Ожидаем подключение онлайн-оплаты CDEK Pay.";
+     checkoutContinue.textContent="CDEK Pay подключается";
+     checkoutContinue.disabled=true;
+     event("CHECKOUT_SESSION_SAVE_FAILED",{metadata:{payment_status:"cdek_pay_pending"}});
    }
  });
  calc();
