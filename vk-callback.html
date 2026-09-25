@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VK ID — Content Engine</title>
+  <meta name="robots" content="noindex,nofollow">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f5f6f8;color:#111}
+    main{max-width:620px;padding:32px;border-radius:18px;background:#fff;box-shadow:0 10px 30px rgba(0,0,0,.08);text-align:center}
+    h1{margin:0 0 12px;font-size:24px} p{margin:0;line-height:1.5;color:#555}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>VK ID — Content Engine</h1>
+    <p id="msg">Авторизация завершена. Эту вкладку можно закрыть.</p>
+  </main>
+  <script>
+    const q=new URLSearchParams(location.search);
+    if(q.get('error')) document.getElementById('msg').textContent='Авторизация VK ID не завершена. Вернитесь к настройке и повторите вход.';
+  </script>
+</body>
+</html>
