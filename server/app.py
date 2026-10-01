@@ -726,131 +726,22 @@ async def quote(body: QuoteIn, x_internal_key: str | None = Header(default=None)
 async def create_order(body: CreateOrderIn, x_internal_key: str | None = Header(default=None)):
     if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
         raise HTTPException(403, "Forbidden")
-    posting = _parcel(1, body.shipment_method_id)
-    posting["posting_external_id"] = body.order_external_id
-    posting["description"] = "Съёмная ручка для сковороды, 1 шт."
-    payload = {
-        "order_external_id": body.order_external_id,
-        "recipient": {"phone_number": body.phone_number, "full_name": body.full_name},
-        "delivery": {"delivery_point": {"delivery_point_id": body.delivery_point_id}},
-        "postings": [posting],
-    }
-    idem = str(uuid.uuid5(uuid.NAMESPACE_URL, "snoved-ozon:" + (body.order_external_id or body.phone_number + ":" + str(body.delivery_point_id))))
-    result = await _ozon_post("/v1/order/create", payload, idempotency_key=idem)
-    return {"ok": True, "ozon": result}
+    # This legacy request has no trusted InSales/payment linkage. Fail closed.
+    raise HTTPException(409, "Verified YooKassa payment linkage is required before fulfillment")
 
 @app.post("/api/order/{source_token}/paid")
 async def mark_order_paid(source_token: str, x_internal_key: str | None = Header(default=None)):
     if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
         raise HTTPException(403, "Forbidden")
-    if not db:
-        raise HTTPException(503, "Database is not configured")
-    async with db.acquire() as c:
-        checkout = await c.fetchrow("""
-            SELECT source_token, quantity, unit_price, total_amount
-            FROM site_checkout_sessions WHERE source_token=$1
-        """, source_token)
-        delivery = await c.fetchrow("""
-            SELECT delivery_point_id, shipment_method_id, point_name, point_address, selection_type
-            FROM ozon_delivery_selections WHERE source_token=$1
-        """, source_token)
-    if not checkout:
-        raise HTTPException(404, "Checkout not found")
-    if not delivery:
-        raise HTTPException(409, "Ozon pickup point is not selected")
-    pii = await _pii_call("get", {"source_token": source_token})
-    customer = pii.get("customer") or {}
-    if not customer.get("phone_number") or not customer.get("full_name"):
-        raise HTTPException(409, "Temporary customer data not found")
-    await _pii_call("set_status", {"source_token": source_token, "status": "PAID"})
-    async with db.acquire() as c:
-        await c.execute("""
-            INSERT INTO order_fulfillment(source_token,payment_status,ozon_status,updated_at)
-            VALUES($1,'PAID','READY_AFTER_PAYMENT',NOW())
-            ON CONFLICT(source_token) DO UPDATE SET
-              payment_status='PAID', updated_at=NOW()
-        """, source_token)
-    if not ENABLE_REAL_OZON_CREATE:
-        return {
-            "ok": True,
-            "status": "PAID_PREPARED",
-            "ozon_create_enabled": False,
-            "message": "Real Ozon order creation stays disabled until CDEK Pay approval."
-        }
-    if int(delivery["delivery_point_id"] or 0) <= 0 or int(delivery["shipment_method_id"] or 0) <= 0:
-        async with db.acquire() as c:
-            await c.execute("""
-                UPDATE order_fulfillment SET ozon_status='MANUAL_PVZ_REQUIRED', updated_at=NOW()
-                WHERE source_token=$1
-            """, source_token)
-        return {"ok": True, "status": "MANUAL_PVZ_REQUIRED", "ozon_created": False}
-    if int(checkout["quantity"] or 1) != 1:
-        async with db.acquire() as c:
-            await c.execute("""
-                UPDATE order_fulfillment SET ozon_status='PACKING_REVIEW_REQUIRED', updated_at=NOW()
-                WHERE source_token=$1
-            """, source_token)
-        return {"ok": True, "status": "PACKING_REVIEW_REQUIRED", "ozon_created": False}
-    order_external_id = "snoved-" + source_token[:48]
-    posting = _parcel(1, int(delivery["shipment_method_id"]))
-    posting["posting_external_id"] = order_external_id + "-1"
-    posting["description"] = "Съёмная ручка для сковороды, 1 шт."
-    posting["declared_value"] = {"amount": str(int(checkout["total_amount"])), "currency_code": "RUB"}
-    payload = {
-        "order_external_id": order_external_id,
-        "recipient": {
-            "phone_number": customer["phone_number"],
-            "full_name": customer["full_name"],
-        },
-        "delivery": {"delivery_point": {"delivery_point_id": int(delivery["delivery_point_id"])}},
-        "postings": [posting],
-    }
-    idem = str(uuid.uuid5(uuid.NAMESPACE_URL, "snoved-paid:" + source_token))
-    result = await _ozon_post("/v1/order/create", payload, idempotency_key=idem)
-    order_id = result.get("order_id") or result.get("id")
-    postings = result.get("postings") or []
-    posting_id = None
-    if isinstance(postings, list) and postings:
-        first = postings[0] if isinstance(postings[0], dict) else {}
-        posting_id = first.get("posting_id") or first.get("posting_number") or first.get("id")
-    async with db.acquire() as c:
-        await c.execute("""
-            UPDATE order_fulfillment
-            SET ozon_status='CREATED', ozon_order_id=$2, ozon_posting_id=$3,
-                ozon_response=$4::jsonb, updated_at=NOW()
-            WHERE source_token=$1
-        """, source_token, str(order_id) if order_id else None,
-             str(posting_id) if posting_id else None,
-             json.dumps(result, ensure_ascii=False))
-    await _pii_call("set_status", {"source_token": source_token, "status": "SHIPPING"})
-    return {"ok": True, "status": "OZON_CREATED", "ozon": result}
+    # Internal access alone is not evidence that money was received.
+    raise HTTPException(409, "Payment status can only be accepted after YooKassa API verification")
 
 @app.post("/api/order/{source_token}/delivery-status")
 async def update_delivery_status(source_token: str, body: DeliveryStatusIn, x_internal_key: str | None = Header(default=None)):
     if not INTERNAL_KEY or x_internal_key != INTERNAL_KEY:
         raise HTTPException(403, "Forbidden")
-    if not db:
-        raise HTTPException(503, "Database is not configured")
-    status = " ".join(body.status.split())[:60]
-    tracking = (body.tracking_number or "").strip()[:160] or None
-    async with db.acquire() as c:
-        await c.execute("""
-            INSERT INTO order_fulfillment(source_token,payment_status,ozon_status,tracking_number,updated_at)
-            VALUES($1,'UNKNOWN',$2,$3,NOW())
-            ON CONFLICT(source_token) DO UPDATE SET
-              ozon_status=EXCLUDED.ozon_status,
-              tracking_number=COALESCE(EXCLUDED.tracking_number,order_fulfillment.tracking_number),
-              updated_at=NOW()
-        """, source_token, status, tracking)
-    normalized = status.lower().replace("-", "_").replace(" ", "_")
-    delivered = normalized in {"delivered","received","получен","выдан","delivered_to_customer","received_by_customer"}
-    if delivered:
-        pii = await _pii_call("mark_delivered", {"source_token": source_token})
-        async with db.acquire() as c:
-            await c.execute("UPDATE site_checkout_sessions SET status='DELIVERED', updated_at=NOW() WHERE source_token=$1", source_token)
-        return {"ok": True, "status": status, "tracking_number": tracking, "pii": pii}
-    await _pii_call("set_status", {"source_token": source_token, "status": "IN_TRANSIT"})
-    return {"ok": True, "status": status, "tracking_number": tracking}
+    # This legacy callback cannot prove a native paid order binding.
+    raise HTTPException(409, "Verified paid order linkage is required before delivery or review processing")
 
 @app.post("/api/order/{source_token}/return-open")
 async def open_return(source_token: str, x_internal_key: str | None = Header(default=None)):
@@ -871,3 +762,182 @@ async def close_return(source_token: str, x_internal_key: str | None = Header(de
         async with db.acquire() as c:
             await c.execute("UPDATE site_checkout_sessions SET status='RETURN_CLOSED', updated_at=NOW() WHERE source_token=$1", source_token)
     return result
+
+# Server-side YooKassa diagnostics; credentials never enter storefront responses.
+async def _yookassa_read(path: str, supplied_key: str | None):
+    import hmac
+    if not INTERNAL_KEY or not supplied_key or not hmac.compare_digest(supplied_key, INTERNAL_KEY):
+        raise HTTPException(403, "Forbidden")
+    shop = os.getenv("YOOKASSA_SHOP_ID", "")
+    secret = os.getenv("YOOKASSA_SECRET_KEY", "")
+    if not shop or not secret:
+        raise HTTPException(503, "YooKassa credentials are not configured")
+    try:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=False) as client:
+            response = await client.get("https://api.yookassa.ru/v3/" + path, auth=(shop, secret))
+    except httpx.HTTPError:
+        raise HTTPException(502, "YooKassa connection failed")
+    if response.status_code != 200:
+        raise HTTPException(502, {"provider_http_status": response.status_code})
+    return response.json()
+
+@app.get("/api/internal/yookassa/account", include_in_schema=False)
+async def yookassa_account(x_internal_key: str | None = Header(default=None)):
+    data = await _yookassa_read("me", x_internal_key)
+    return {key: data.get(key) for key in ("account_id", "status", "test", "payment_methods")}
+
+@app.get("/api/internal/yookassa/payments", include_in_schema=False)
+async def yookassa_recent_payments(x_internal_key: str | None = Header(default=None)):
+    data = await _yookassa_read("payments?limit=30", x_internal_key)
+    return {"items": [{key: item.get(key) for key in
+        ("id", "status", "paid", "amount", "description", "test", "created_at")}
+        for item in data.get("items", [])]}
+
+@app.get("/api/internal/yookassa/payments/{payment_id}", include_in_schema=False)
+async def yookassa_payment_status(payment_id: str, x_internal_key: str | None = Header(default=None)):
+    try:
+        canonical = str(uuid.UUID(payment_id))
+    except ValueError:
+        raise HTTPException(400, "Invalid payment ID")
+    data = await _yookassa_read("payments/" + canonical, x_internal_key)
+    return {key: data.get(key) for key in ("id", "status", "paid", "amount", "description", "metadata", "test", "payment_method", "recipient", "merchant_customer_id", "confirmation")}
+
+# Native InSales payment reconciliation. Bindings require trusted internal access.
+from decimal import Decimal
+from payment_validation import validate_payment
+
+class NativePaymentBinding(BaseModel):
+    order_id: int = Field(gt=0)
+    order_number: int = Field(gt=0)
+    payment_id: uuid.UUID
+    quantity: int = Field(ge=1, le=100)
+    recipient_name: str = Field(min_length=1, max_length=250)
+    phone: str = Field(min_length=5, max_length=40)
+    email: str = Field(max_length=250)
+    pickup_point_id: str = Field(min_length=1, max_length=100)
+    pickup_title: str = Field(max_length=250)
+    pickup_address: str = Field(min_length=1, max_length=1000)
+    pickup_city: str = Field(min_length=1, max_length=250)
+
+class YooNotificationObject(BaseModel):
+    id: uuid.UUID
+
+class YooNotification(BaseModel):
+    type: str
+    event: str
+    object: YooNotificationObject
+
+_payment_schema_ready = False
+_payment_schema_lock = asyncio.Lock()
+
+async def _payment_schema():
+    global _payment_schema_ready
+    if not db:
+        raise HTTPException(503, 'Database is not configured')
+    async with _payment_schema_lock:
+        if _payment_schema_ready:
+            return
+        async with db.acquire() as c:
+            await c.execute('''CREATE TABLE IF NOT EXISTS insales_yookassa_payments (
+                payment_id TEXT PRIMARY KEY, order_id BIGINT NOT NULL,
+                order_number BIGINT NOT NULL, quantity INT NOT NULL, amount NUMERIC(12,2) NOT NULL,
+                order_snapshot JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                notification_state TEXT NOT NULL DEFAULT 'not_sent', error_code TEXT,
+                notification_message_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+                CREATE INDEX IF NOT EXISTS insales_yoo_order_idx ON insales_yookassa_payments(order_id);
+                CREATE TABLE IF NOT EXISTS insales_yookassa_unbound_events (
+                payment_id TEXT PRIMARY KEY, status TEXT, observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW());''')
+        _payment_schema_ready = True
+
+@app.post('/api/internal/yookassa/bind', include_in_schema=False)
+async def bind_native_payment(body: NativePaymentBinding, x_internal_key: str | None = Header(default=None)):
+    payment_id = str(body.payment_id)
+    payment = await _yookassa_read('payments/' + payment_id, x_internal_key)
+    snapshot = body.model_dump(mode='json')
+    expected = {'payment_id': payment_id, 'order_number': body.order_number, 'amount': Decimal(body.quantity)*800}
+    error = validate_payment(payment, expected, os.getenv('YOOKASSA_SHOP_ID', ''))
+    if error and error != 'not_paid':
+        raise HTTPException(409, error)
+    await _payment_schema()
+    async with db.acquire() as c:
+        await c.execute('''INSERT INTO insales_yookassa_payments
+            (payment_id,order_id,order_number,quantity,amount,order_snapshot)
+            VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(payment_id) DO NOTHING''',
+            payment_id, body.order_id, body.order_number, body.quantity, expected['amount'], json.dumps(snapshot))
+        row = await c.fetchrow('SELECT order_id,order_number,quantity FROM insales_yookassa_payments WHERE payment_id=$1', payment_id)
+        if row['order_id'] != body.order_id or row['order_number'] != body.order_number or row['quantity'] != body.quantity:
+            raise HTTPException(409, 'Existing payment binding cannot be changed')
+    return {'ok': True, 'payment_id': payment_id, 'order_id': body.order_id}
+
+@app.post('/api/yookassa/notifications', include_in_schema=False)
+async def yookassa_notification(body: YooNotification):
+    if body.type != 'notification' or body.event not in ('payment.succeeded', 'payment.canceled'):
+        return {'ok': True, 'ignored': True}
+    payment_id = str(body.object.id)
+    # A webhook body is not evidence of payment: re-fetch with server credentials.
+    payment = await _yookassa_read('payments/' + payment_id, INTERNAL_KEY)
+    await _payment_schema()
+    token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    owner = os.getenv('OWNER_CHAT_ID', '')
+    async with db.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow('SELECT * FROM insales_yookassa_payments WHERE payment_id=$1 FOR UPDATE', payment_id)
+            if not row:
+                await c.execute('''INSERT INTO insales_yookassa_unbound_events(payment_id,status)
+                    VALUES($1,$2) ON CONFLICT(payment_id) DO UPDATE SET status=EXCLUDED.status,observed_at=NOW()''', payment_id, payment.get('status'))
+                # Native order data must be registered from a trusted source first.
+                return {'ok': True, 'quarantined': True}
+            error = validate_payment(payment, row, os.getenv('YOOKASSA_SHOP_ID', ''))
+            if error:
+                await c.execute('UPDATE insales_yookassa_payments SET status=$2,error_code=$3,updated_at=NOW() WHERE payment_id=$1',
+                    payment_id, 'canceled' if payment.get('status') == 'canceled' else 'pending', error)
+                return {'ok': True, 'processed': False, 'reason': error}
+            if row['notification_state'] != 'not_sent':
+                return {'ok': True, 'duplicate': True}
+            if not token or not owner:
+                raise HTTPException(503, 'Owner notification channel is not configured')
+            # Commit the claim BEFORE the external send. Ambiguous sends never retry automatically.
+            await c.execute("UPDATE insales_yookassa_payments SET status='succeeded',notification_state='claimed',error_code=NULL,updated_at=NOW() WHERE payment_id=$1", payment_id)
+            snapshot = json.loads(row['order_snapshot']) if isinstance(row['order_snapshot'], str) else row['order_snapshot']
+            amount = str(row['amount'])
+    message = ('✅ НОВЫЙ ОПЛАЧЕННЫЙ ЗАКАЗ\n\n'
+        f"Заказ: №{snapshot['order_number']}\nОплачено: {amount} ₽\nКоличество: {snapshot['quantity']}\n"
+        f"Получатель: {snapshot['recipient_name']}\nТелефон: {snapshot['phone']}\nEmail: {snapshot['email']}\n"
+        f"Ozon ПВЗ: {snapshot['pickup_title']}\nАдрес ПВЗ: {snapshot['pickup_address']}")
+    state, message_id = 'unknown', None
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post('https://api.telegram.org/bot' + token + '/sendMessage',
+                json={'chat_id': owner, 'text': message, 'disable_web_page_preview': True})
+        if response.status_code == 200 and response.json().get('ok'):
+            state, message_id = 'sent', response.json()['result']['message_id']
+    except httpx.HTTPError:
+        pass  # Never log Telegram URLs: they contain the bot credential.
+    async with db.acquire() as c:
+        await c.execute('UPDATE insales_yookassa_payments SET notification_state=$2,notification_message_id=$3,updated_at=NOW() WHERE payment_id=$1', payment_id, state, message_id)
+    # No Ozon shipment, fulfillment, or review action is performed here.
+    return {'ok': True, 'verified_paid': True, 'notification_state': state}
+
+@app.get('/api/internal/yookassa/processing/{payment_id}', include_in_schema=False)
+async def native_payment_processing(payment_id: uuid.UUID, x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY, x_internal_key):
+        raise HTTPException(403, 'Forbidden')
+    await _payment_schema()
+    async with db.acquire() as c:
+        row = await c.fetchrow('SELECT payment_id,order_id,status,notification_state,error_code,notification_message_id FROM insales_yookassa_payments WHERE payment_id=$1', str(payment_id))
+    if not row:
+        raise HTTPException(404, 'Payment is not linked to a trusted native order')
+    return dict(row)
+
+@app.get('/api/internal/yookassa/fulfillment-audit', include_in_schema=False)
+async def payment_fulfillment_audit(x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(x_internal_key, INTERNAL_KEY):
+        raise HTTPException(403, 'Forbidden')
+    if not db:
+        raise HTTPException(503, 'Database is not configured')
+    async with db.acquire() as c:
+        row = await c.fetchrow("SELECT count(*) AS fulfillment_rows, count(*) FILTER (WHERE ozon_order_id IS NOT NULL) AS ozon_orders_created, count(*) FILTER (WHERE payment_status='PAID') AS paid_fulfillment_rows FROM order_fulfillment")
+    return dict(row)
