@@ -409,7 +409,19 @@ class Controller:
         for r in orders:
             if r['payment_status']=='succeeded' and r['shipment_id'] and r['ozon_status'] in ('created','forming','ready_for_shipping'):
                 await self.notify(c,'ozon-confirm-'+str(r['order_id']),
-                    f"📦 Заказ №{r['order_number']}: отправление {r['shipment_id']} требует проверки/подтверждения в Ozon.\nНомер: {r['tracking_number'] or 'ожидается'}. Не создавайте дубль.")
+                    f"📦 Заказ №{r['order_number']}: отправление {r['shipment_id']}, статус {r['ozon_status']}.\nНомер: {r['tracking_number'] or 'ожидается'}. Проверьте очередь сборки/этикетку и передайте посылку в Ozon; дубль не создавайте.")
+
+    async def daily_shipments(self,c,now):
+        local=now.astimezone(MOSCOW)
+        if local.hour < 18: return
+        rows=await c.fetch('''SELECT order_number,tracking_number,ozon_status FROM commerce_pending_orders
+            WHERE payment_status='succeeded' AND ozon_status IN ('created','forming','forming_failed','ready_for_shipping')
+            ORDER BY created_at''')
+        if rows:
+            lines=['📦 ОЧЕРЕДЬ ОТГРУЗКИ '+local.date().isoformat()]
+            lines += [f"№{r['order_number']} — {r['tracking_number'] or 'номер ожидается'} — {r['ozon_status']}" for r in rows]
+            lines.append('Проверьте сборку и этикетки в Ozon. Подтверждённые посылки передайте в пункт отгрузки. Повторные отправления не создавайте.')
+            await self.notify(c,'daily-shipment-'+local.date().isoformat(),'\n'.join(lines))
 
     async def stock(self,c,now):
         # Owner estimate is explicitly labeled; never overwrite native stock.
@@ -475,6 +487,7 @@ class Controller:
                             paused = paused or service_bad
                             await self.hourly(c,now,paused)
                             await self.weekly(c,now)
+                            await self.daily_shipments(c,now)
                             self.status={'state':'running','checked_at':now.isoformat(),'live_writes':self.writes,'campaign':CAMPAIGN}
                             await self.put(c,'health',self.status)
                         finally:

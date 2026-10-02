@@ -6,7 +6,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from customer_messages import STATUS_LABELS, email_ready, send_customer_email, production_email_allowed, send_resend_test, EmailDeliveryRejected
 from paid_metrika import paid_conversion, conversion_csv
 from profit_controller import Controller
@@ -119,7 +119,7 @@ async def _get_token():
         _token = token
         return token
 
-async def _ozon_post(path: str, payload: dict, idempotency_key: str | None = None):
+async def _ozon_post(path: str, payload: dict, idempotency_key: str | None = None, binary=False):
     token = await _get_token()
     url = urljoin(OZON_API_BASE, path.lstrip("/"))
     expected = _safe_origin(OZON_API_BASE)
@@ -133,7 +133,11 @@ async def _ozon_post(path: str, payload: dict, idempotency_key: str | None = Non
         seen.add(url)
         r = await _http.post(url, json=payload, headers=headers)
         if r.status_code not in (302, 307):
-            data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"message": r.text[:500]}
+            if binary and r.status_code == 200:
+                if not r.content.startswith(b'%PDF-') or len(r.content) > 8000000:
+                    raise HTTPException(502, 'Ozon label is not a valid PDF')
+                return r.content
+            data = r.json() if r.content and r.headers.get("content-type", "").startswith("application/json") else {"message": r.text[:500]}
             if r.status_code >= 400:
                 msg = data.get("message") or data.get("error") or f"HTTP {r.status_code}"
                 raise HTTPException(502, f"Ozon API error: {msg}")
@@ -1308,6 +1312,7 @@ async def _sync_post_purchase():
                 await c.execute("INSERT INTO commerce_service_messages(order_id,kind) VALUES($1,'paid_email') ON CONFLICT DO NOTHING",row['order_id'])
                 if status=='in_delivery_point':
                     await c.execute("INSERT INTO commerce_service_messages(order_id,kind) VALUES($1,'ready_email') ON CONFLICT DO NOTHING",row['order_id'])
+            await _process_posting_operations(row, postings)
             for kind in ('paid_email','ready_email'):
                 await _send_queued_customer_email(row,kind)
         except Exception as exc:
@@ -1315,6 +1320,81 @@ async def _sync_post_purchase():
                 failures=await c.fetchval('''UPDATE commerce_pending_orders SET post_purchase_failures=post_purchase_failures+1
                     WHERE order_id=$1 RETURNING post_purchase_failures''',row['order_id'])
             if failures>=3:await _owner_post_purchase_alert(row,'Ozon: отправление/номер/статус не подтверждён после повторных проверок.')
+
+async def _ozon_operations_schema():
+    async with db.acquire() as c:
+        await c.execute('''CREATE TABLE IF NOT EXISTS commerce_posting_operations (
+            posting_number TEXT PRIMARY KEY,order_id BIGINT NOT NULL,approve_state TEXT,
+            label_pdf BYTEA,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());''')
+
+async def _process_posting_operations(row, postings):
+    """Existing paid, identity-checked postings only. Never create an order here."""
+    if row['payment_status'] != 'succeeded': return
+    await _ozon_operations_schema()
+    for posting in postings:
+        number, state = posting['posting_number'], posting.get('status')
+        async with db.acquire() as c:
+            await c.execute('''INSERT INTO commerce_posting_operations(posting_number,order_id)
+                VALUES($1,$2) ON CONFLICT DO NOTHING''',number,row['order_id'])
+        if state == 'created' and os.getenv('OZON_AUTO_APPROVE','').lower() == 'true':
+            async with db.acquire() as c:
+                claim = await c.fetchval('''UPDATE commerce_posting_operations SET approve_state='claimed',updated_at=NOW()
+                    WHERE posting_number=$1 AND order_id=$2 AND approve_state IS NULL RETURNING posting_number''',number,row['order_id'])
+            if claim:
+                approved = 'unknown'
+                try:
+                    await _ozon_post('/v1/posting/approve', {'posting_number':number})
+                    approved = 'accepted'
+                except Exception:
+                    await _owner_post_purchase_alert(row,'Ozon: подтверждение сборки не подтверждено. Проверьте баланс и отправление; автоматического повторного подтверждения не будет.')
+                async with db.acquire() as c:
+                    await c.execute('UPDATE commerce_posting_operations SET approve_state=$2,updated_at=NOW() WHERE posting_number=$1',number,approved)
+        elif state in ('forming','ready_for_shipping','in_container','acceptance_in_progress','on_way','in_delivery_point','in_courier_service','delivered'):
+            async with db.acquire() as c:
+                await c.execute("UPDATE commerce_posting_operations SET approve_state='verified',updated_at=NOW() WHERE posting_number=$1 AND approve_state IS DISTINCT FROM 'verified'",number)
+        if state == 'ready_for_shipping':
+            async with db.acquire() as c:
+                missing = await c.fetchval('SELECT label_pdf IS NULL FROM commerce_posting_operations WHERE posting_number=$1',number)
+            if missing:
+                try:
+                    pdf = await _ozon_post('/v1/posting/label',{'posting_number':number},binary=True)
+                    async with db.acquire() as c:
+                        await c.execute('UPDATE commerce_posting_operations SET label_pdf=$2,updated_at=NOW() WHERE posting_number=$1 AND label_pdf IS NULL',number,pdf)
+                except Exception:
+                    await _owner_post_purchase_alert(row,'Ozon: этикетка пока недоступна. Откройте отправление в Ozon для проверки; дубль не создавайте.')
+
+def _operations_access(key):
+    import hmac
+    if not INTERNAL_KEY or not key or not hmac.compare_digest(INTERNAL_KEY,key):
+        raise HTTPException(403,'Forbidden')
+
+@app.get('/api/internal/commerce/shipment-queue',include_in_schema=False)
+async def shipment_queue(x_internal_key: str | None = Header(default=None)):
+    _operations_access(x_internal_key)
+    await _ozon_operations_schema()
+    async with db.acquire() as c:
+        items = await c.fetch('''SELECT p.order_number,p.order_id,p.quantity,p.shipment_id,p.tracking_number,p.ozon_status,
+            p.created_at,p.status_checked_at,o.posting_number,o.approve_state,o.label_pdf IS NOT NULL AS label_ready
+            FROM commerce_pending_orders p LEFT JOIN commerce_posting_operations o USING(order_id)
+            WHERE p.payment_status='succeeded' AND p.ozon_status IN ('created','forming','forming_failed','ready_for_shipping')
+            ORDER BY p.created_at''')
+    return {'automatic_confirmation':os.getenv('OZON_AUTO_APPROVE','').lower()=='true','items':[dict(r) for r in items]}
+
+@app.get('/api/internal/commerce/shipment-labels.zip',include_in_schema=False)
+async def shipment_labels(x_internal_key: str | None = Header(default=None)):
+    _operations_access(x_internal_key)
+    await _ozon_operations_schema()
+    async with db.acquire() as c:
+        items = await c.fetch('''SELECT o.posting_number,o.label_pdf FROM commerce_posting_operations o
+            JOIN commerce_pending_orders p USING(order_id) WHERE p.payment_status='succeeded'
+            AND p.ozon_status='ready_for_shipping' AND o.label_pdf IS NOT NULL ORDER BY p.created_at LIMIT 100''')
+    import io,zipfile,re
+    out=io.BytesIO()
+    with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as archive:
+        for item in items:
+            name=re.sub(r'[^A-Za-z0-9-]','_',item['posting_number'])
+            archive.writestr(name+'.pdf',bytes(item['label_pdf']))
+    return Response(out.getvalue(),media_type='application/zip',headers={'Content-Disposition':'attachment; filename="ozon-ready-labels.zip"','Cache-Control':'no-store'})
 
 class CustomerStatusIn(BaseModel):
     order_key: str = Field(pattern=r'^[a-f0-9]{32}$')
