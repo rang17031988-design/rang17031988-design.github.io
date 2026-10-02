@@ -31,6 +31,8 @@ def decision(bid, data, now, last_change=None):
     paid, spend = data.get('paid', 0), Decimal(str(data.get('spend', 0)))
     if clicks >= 20 and spend / clicks > MAX_BID:
         return ('suspend', None, 'anomalous_cpc', True)
+    if data.get('irrelevant_clicks', 0) >= 10:
+        return ('suspend', None, 'explicitly_irrelevant_queries', True)
     if clicks >= 100 and paid == 0 and data.get('attribution_complete'):
         return ('suspend', None, '100_clicks_without_paid', True)
     if last_change and now - last_change < timedelta(hours=2):
@@ -235,6 +237,65 @@ class Controller:
             return True
         return campaign['State'] != 'ON'
 
+    async def service_guard(self, c, campaign, now):
+        """Two independent failed checks pause spend; recovery requires owner review."""
+        checks = {}
+        try:
+            landing = await self.http.get('https://xn--163-5cdt3dgrs.xn--p1ai/', follow_redirects=True)
+            checks['landing'] = landing.status_code == 200 and '800' in landing.text and 'Купить' in landing.text
+        except Exception:
+            checks['landing'] = False
+        try:
+            backend = await self.http.get('https://ozon-delivery-gateway-production.up.railway.app/health')
+            body = backend.json()
+            checks['backend'] = backend.status_code == 200 and all(body.get(k) for k in
+                ('ok', 'db_configured', 'pii_configured', 'payment_reconciliation_running'))
+        except Exception:
+            checks['backend'] = False
+        try:
+            payment = await self.http.get('https://api.yookassa.ru/v3/me',
+                auth=(os.getenv('YOOKASSA_SHOP_ID', ''), os.getenv('YOOKASSA_SECRET_KEY', '')))
+            checks['payment_api'] = payment.status_code == 200
+        except Exception:
+            checks['payment_api'] = False
+        previous = await self.state(c, 'service_checks') or {}
+        failures = 0 if all(checks.values()) else int(previous.get('failures', 0)) + 1
+        await self.put(c, 'service_checks', {'checked_at':now.isoformat(), 'checks':checks, 'failures':failures})
+        if failures >= 2 and campaign['State'] == 'ON' and not await self.state(c, 'paused'):
+            if await self.mutate(c, None, 'suspend', 'landing_or_payment_unavailable', emergency=True):
+                await self.put(c, 'paused', {'day':now.astimezone(MOSCOW).date().isoformat(),
+                    'reason':'service_unavailable', 'resume_allowed':False})
+                await self.notify(c, 'service-failure-'+now.date().isoformat(),
+                    '⚠️ Direct остановлен: две последовательные проверки магазина/платёжного backend не прошли. Проверьте сервисы перед возобновлением рекламы.')
+        return failures > 0
+
+    async def actual_payment_costs(self, c, start, end):
+        """Read-only provider amounts; missing income_amount remains unknown."""
+        rows = await c.fetch('''SELECT p.order_id,p.payment_id,p.amount FROM commerce_pending_orders p
+            LEFT JOIN profit_controller_costs k USING(order_id)
+            WHERE p.payment_status='succeeded' AND p.payment_id IS NOT NULL
+            AND p.created_at >= $1 AND p.created_at < $2 AND k.yookassa IS NULL LIMIT 50''', start, end)
+        for row in rows:
+            try:
+                import uuid
+                pid = str(uuid.UUID(row['payment_id']))
+                response = await self.http.get('https://api.yookassa.ru/v3/payments/'+pid,
+                    auth=(os.getenv('YOOKASSA_SHOP_ID',''), os.getenv('YOOKASSA_SECRET_KEY','')))
+                if response.status_code != 200: continue
+                payment = response.json()
+                gross, income = payment.get('amount',{}), payment.get('income_amount',{})
+                if (payment.get('id') != pid or payment.get('status') != 'succeeded' or payment.get('paid') is not True
+                        or gross.get('currency') != 'RUB' or income.get('currency') != 'RUB'
+                        or Decimal(gross['value']) != Decimal(str(row['amount']))): continue
+                fee = Decimal(gross['value']) - Decimal(income['value'])
+                if not 0 <= fee <= Decimal(gross['value']): continue
+                await c.execute('''INSERT INTO profit_controller_costs(order_id,yookassa,source)
+                    VALUES($1,$2,'YooKassa amount minus income_amount, including provider tax')
+                    ON CONFLICT(order_id) DO UPDATE SET yookassa=EXCLUDED.yookassa,updated_at=NOW()''',row['order_id'],fee)
+            except Exception:
+                # A cost read cannot interrupt payment polling or invent a fee.
+                continue
+
     async def order_cohort(self, c, start, end):
         return [dict(r) for r in await c.fetch('''SELECT p.order_id,p.order_number,p.quantity,p.amount,
             p.payment_status,p.ozon_status,p.shipment_id,p.tracking_number,p.created_at,
@@ -263,6 +324,7 @@ class Controller:
         stats = await self.report(start_day, today)
         queries = await self.report(start_day, today, True)
         start = datetime.combine(start_day, datetime.min.time(), MOSCOW)
+        await self.actual_payment_costs(c, start, now)
         orders = await self.order_cohort(c, start, now)
         stock = await self.stock(c,now)
         if stock['estimated_units'] < 50:
@@ -322,6 +384,10 @@ class Controller:
                     'commercial_verified':meta.get('AdGroupId')==5800551077,
                     'auction_limited':minimum_required is not None and bid < minimum_required <= MAX_BID,
                     'observation_days':observation_days}
+            # Only unambiguous unrelated purchase intent, never repair/replacement intent.
+            unrelated = re.compile(r'(дверн|мебельн|оконн|письменн|автомобильн|ручк.{0,12}сумк|3d|3д)',re.I)
+            data['irrelevant_clicks'] = sum(r['Clicks'] for r in queries
+                if r.get('CriterionId') == str(kid) and unrelated.search(r.get('Query','')))
             # Unknown economics and attribution block automatic profitable scaling/pause.
             action, target, reason, emergency = decision(bid,data,now,last)
             if action == 'set' and target == bid: action, target = 'hold',None
@@ -405,6 +471,8 @@ class Controller:
                             today = now.astimezone(MOSCOW).date()
                             daily = await self.report(today,today)
                             paused = await self.guard(c,campaigns[0],sum(r['Cost'] for r in daily),now)
+                            service_bad = await self.service_guard(c,campaigns[0],now)
+                            paused = paused or service_bad
                             await self.hourly(c,now,paused)
                             await self.weekly(c,now)
                             self.status={'state':'running','checked_at':now.isoformat(),'live_writes':self.writes,'campaign':CAMPAIGN}
