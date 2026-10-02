@@ -25,6 +25,12 @@ def normalized(term):
     return ' '.join(sorted(re.findall(r'[а-яa-z0-9]+', positive)))
 
 
+def auction_items(item):
+    # Official KeywordBids can return null when auction estimates are absent.
+    # Missing estimates are unknown, not evidence for increasing a bid.
+    return ((item.get('Search') or {}).get('AuctionBids') or {}).get('AuctionBidItems') or []
+
+
 def decision(bid, data, now, last_change=None):
     """Pure decision function; incomplete data can never justify a raise."""
     bid = Decimal(str(bid))
@@ -415,7 +421,7 @@ class Controller:
             unknown = await c.fetchval("SELECT EXISTS(SELECT 1 FROM profit_controller_actions WHERE keyword_id=$1 AND state IN ('prepared','unknown'))",kid)
             if unknown or paused or item.get('ServingStatus') != 'ELIGIBLE': continue
             bid = Decimal(str(item.get('Search',{}).get('Bid',0))) / 1000000
-            auction = item.get('Search',{}).get('AuctionBids',{}).get('AuctionBidItems',[])
+            auction = auction_items(item)
             required = [Decimal(str(a['Bid'])) / 1000000 for a in auction if a.get('Bid')]
             minimum_required = min(required) if required else None
             fully_costed = [r for r in matched if r['ozon_status']=='delivered' and
