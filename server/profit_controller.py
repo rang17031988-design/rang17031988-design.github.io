@@ -264,11 +264,20 @@ class Controller:
         queries = await self.report(start_day, today, True)
         start = datetime.combine(start_day, datetime.min.time(), MOSCOW)
         orders = await self.order_cohort(c, start, now)
+        stock = await self.stock(c,now)
+        if stock['estimated_units'] < 50:
+            if not paused:
+                if await self.mutate(c,None,'suspend','critical_estimated_stock',emergency=True):
+                    await self.put(c,'paused',{'day':today.isoformat(),'reason':'critical_stock','resume_allowed':False})
+            paused = True
         costs = {k:sum(float(r[k]) for r in orders) if orders and all(r[k] is not None for r in orders) else None
                  for k in ('yookassa','ozon','returns_other')}
         econ = economics(orders,sum(r['Cost'] for r in stats),sum(r['Clicks'] for r in stats),
                          sum(r['Impressions'] for r in stats),costs)
         metric = await self.metrika(start_day,today)
+        metric['backend_checkout_records'] = await c.fetchval('''SELECT count(*) FROM commerce_pending_orders
+            WHERE created_at >= $1 AND created_at < $2''',start,now)
+        metric['backend_checkout_basis'] = 'validated checkout preparation records; not Metrika goal or unique visits'
         bid_result = await self.api('keywordbids','get',{'SelectionCriteria':{'CampaignIds':[CAMPAIGN]},
             'FieldNames':['KeywordId','AdGroupId','CampaignId','ServingStatus'],
             'SearchFieldNames':['Bid','AuctionBids']})
@@ -324,15 +333,11 @@ class Controller:
         payload = {'direct':stats,'queries':queries,'metrika':metric,'economics':econ,
                    'attribution':{'real_yclid_orders':sum(bool((value_json(r['attribution']) or {}).get('yclid')) for r in orders)},
                    'live_writes':self.writes,'stock':{'units':None,'basis':'owner estimate 700; authoritative inventory not connected'}}
-        stock = await self.stock(c,now)
         payload['stock'] = stock
         if stock.get('estimated_units') is not None:
             for threshold in (300,150,100,50):
                 if stock['estimated_units'] < threshold:
                     await self.notify(c,'stock-'+str(threshold),f"⚠️ Остаток ручек ниже {threshold}: оценка {stock['estimated_units']} шт. Проверьте фактический склад до масштабирования.")
-            if stock['estimated_units'] < 50 and not paused:
-                if await self.mutate(c,None,'suspend','critical_estimated_stock',emergency=True):
-                    await self.put(c,'paused',{'day':today.isoformat(),'reason':'critical_stock','resume_allowed':False})
         await c.execute('INSERT INTO profit_controller_snapshots(hour,payload) VALUES($1,$2::jsonb) ON CONFLICT DO NOTHING',hour,json.dumps(payload,default=str))
         # Paid shipments still requiring an owner action are queued once; never reconfirm on_way.
         for r in orders:
