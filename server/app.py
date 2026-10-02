@@ -474,7 +474,7 @@ async def startup():
         _sync_task = asyncio.create_task(_background_sync_loop())
         _payment_task = asyncio.create_task(_background_payment_reconciliation())
         if os.getenv('PROFIT_CONTROLLER_ENABLED', '').lower() == 'true':
-            _profit_controller = Controller(db, _http)
+            _profit_controller = Controller(db, _http, _ozon_post)
             _profit_task = asyncio.create_task(_profit_controller.loop())
 
     if PII_FUNCTION_URL and PII_INTERNAL_KEY:

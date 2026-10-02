@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 CAMPAIGN = 714566814
 MOSCOW = ZoneInfo('Europe/Moscow')
-MIN_BID, MAX_BID, STEP = Decimal('5'), Decimal('10'), Decimal('.5')
+MIN_BID, MAX_BID, STEP = Decimal('10'), Decimal('20'), Decimal('.5')
 LOCK = 714566814
 
 
@@ -19,7 +19,10 @@ def value_json(v):
 
 
 def normalized(term):
-    return ' '.join(sorted(re.findall(r'[а-яa-z0-9]+', term.lower().replace('ё', 'е'))))
+    # Direct's {keyword} may omit attached minus words. They are targeting rules,
+    # not part of the phrase the buyer clicked.
+    positive = re.sub(r'(?<!\w)-[^\s]+', '', term.lower().replace('ё', 'е'))
+    return ' '.join(sorted(re.findall(r'[а-яa-z0-9]+', positive)))
 
 
 def decision(bid, data, now, last_change=None):
@@ -45,7 +48,7 @@ def decision(bid, data, now, last_change=None):
         contribution = Decimal(str(data['contribution']))
         if contribution <= 0:
             return ('set', max(MIN_BID, bid - STEP), 'unprofitable_paid', False)
-        if spend / paid <= 100 and data.get('auction_limited'):
+        if spend / paid <= 200 and data.get('auction_limited'):
             return ('set', min(MAX_BID, bid + STEP), 'profitable_auction_limited', False)
     if (clicks == 0 and impressions < 20 and data.get('commercial_verified')
             and data.get('auction_limited') and data.get('observation_days', 0) >= 2):
@@ -68,8 +71,8 @@ def economics(rows, ad_spend, clicks, impressions, costs):
         'ready': select(lambda r: r['ozon_status'] == 'in_delivery_point'),
         'received': select(lambda r: r['ozon_status'] == 'delivered'),
         'canceled': select(lambda r: r['ozon_status'] == 'canceled' or r['payment_status'] == 'canceled'),
-        # Only explicit return statuses count; unknown statuses are not invented.
-        'returned': select(lambda r: r['ozon_status'] in ('returned','return_delivered')),
+        'returned': select(lambda r: r.get('return_received') is True),
+        'return_pending': select(lambda r: r.get('return_pending') is True),
     }
     ratio = lambda n, d: n / d if d else None
     spend = float(ad_spend)
@@ -100,8 +103,9 @@ class DirectError(Exception):
 
 
 class Controller:
-    def __init__(self, pool, http):
+    def __init__(self, pool, http, ozon_read=None):
         self.pool, self.http = pool, http
+        self.ozon_read = ozon_read
         self.status = {'state': 'starting', 'live_writes': False}
 
     @property
@@ -125,6 +129,10 @@ class Controller:
             CREATE TABLE IF NOT EXISTS profit_controller_notifications (
                 key TEXT PRIMARY KEY, state TEXT NOT NULL, message_id BIGINT,
                 created_at TIMESTAMPTZ DEFAULT NOW());
+            CREATE TABLE IF NOT EXISTS profit_controller_returns (
+                return_number TEXT PRIMARY KEY,order_id BIGINT NOT NULL,
+                return_type TEXT NOT NULL,status TEXT NOT NULL,
+                checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
         ''')
 
     async def state(self, c, key):
@@ -224,9 +232,9 @@ class Controller:
         if unresolved:
             await self.notify(c, 'ambiguous_campaign_write', '⚠️ Контроллер Direct: результат изменения кампании неизвестен. Нужна проверка; автоматическое возобновление заблокировано.')
             return True
-        if spend >= 5000:
+        if spend >= 10000:
             if campaign['State'] == 'ON' and not paused:
-                if await self.mutate(c, None, 'suspend', 'daily_5000_moscow', emergency=True):
+                if await self.mutate(c, None, 'suspend', 'daily_10000_moscow', emergency=True):
                     await self.put(c, 'paused', {'day':day,'reason':'daily_spend','resume_allowed':True})
                     await self.notify(c, 'daily-' + day, f'⚠️ Direct: расход {spend:.2f} ₽. Кампания остановлена до следующего дня (МСК).')
             return True
@@ -296,10 +304,48 @@ class Controller:
                 # A cost read cannot interrupt payment polling or invent a fee.
                 continue
 
+    async def actual_returns(self, c, start):
+        """Official read-only return API, linked only to our immutable parcel IDs."""
+        if self.ozon_read is None:return {'available':False,'reason':'reader_missing'}
+        cursor=None;seen=set();matched=0;unlinked=0
+        try:
+            for page in range(100):
+                result=await self.ozon_read('/v1/return/search',{
+                    'filters':{'created_at_from':start.isoformat()},
+                    'pagination':{'limit':100,'cursor':cursor}})
+                if not isinstance(result.get('returns'),list):raise ValueError('invalid_returns')
+                for item in result['returns']:
+                    identity=re.fullmatch(r'posuda-insales-(\d+)-(\d+)',item.get('return_external_id') or '')
+                    if not identity or not item.get('return_number'):
+                        unlinked+=1;continue
+                    order_id,index=map(int,identity.groups())
+                    quantity=await c.fetchval("SELECT quantity FROM commerce_pending_orders WHERE order_id=$1 AND payment_status='succeeded'",order_id)
+                    if quantity is None or not 1<=index<=quantity:
+                        unlinked+=1;continue
+                    if item.get('return_type') not in ('client_return','cancellation') or item.get('status') not in ('unknown','moving','at_pickup_point','received','utilization','utilized','written_off','looking_for'):
+                        unlinked+=1;continue
+                    await c.execute('''INSERT INTO profit_controller_returns(return_number,order_id,return_type,status)
+                        VALUES($1,$2,$3,$4) ON CONFLICT(return_number) DO UPDATE
+                        SET status=EXCLUDED.status,checked_at=NOW()
+                        WHERE profit_controller_returns.order_id=EXCLUDED.order_id''',
+                        item['return_number'],order_id,item['return_type'],item['status'])
+                    matched+=1
+                cursor=result.get('next_cursor')
+                if not cursor:return {'available':True,'linked':matched,'unlinked':unlinked}
+                if cursor in seen:raise ValueError('repeated_return_cursor')
+                seen.add(cursor)
+            return {'available':False,'reason':'pagination_limit','linked':matched,'unlinked':unlinked}
+        except Exception as exc:
+            return {'available':False,'reason':type(exc).__name__,'linked':matched,'unlinked':unlinked}
+
     async def order_cohort(self, c, start, end):
         return [dict(r) for r in await c.fetch('''SELECT p.order_id,p.order_number,p.quantity,p.amount,
             p.payment_status,p.ozon_status,p.shipment_id,p.tracking_number,p.created_at,
-            p.snapshot->'attribution' AS attribution,k.yookassa,k.ozon,k.returns_other
+            p.snapshot->'attribution' AS attribution,k.yookassa,k.ozon,k.returns_other,
+            EXISTS(SELECT 1 FROM profit_controller_returns r WHERE r.order_id=p.order_id
+                AND r.return_type='client_return' AND r.status='received') AS return_received,
+            EXISTS(SELECT 1 FROM profit_controller_returns r WHERE r.order_id=p.order_id
+                AND r.return_type='client_return' AND r.status<>'received') AS return_pending
             FROM commerce_pending_orders p LEFT JOIN profit_controller_costs k USING(order_id)
             WHERE p.order_id IS NOT NULL AND p.created_at >= $1 AND p.created_at < $2''',start,end)]
 
@@ -325,6 +371,7 @@ class Controller:
         queries = await self.report(start_day, today, True)
         start = datetime.combine(start_day, datetime.min.time(), MOSCOW)
         await self.actual_payment_costs(c, start, now)
+        return_sync=await self.actual_returns(c, start)
         orders = await self.order_cohort(c, start, now)
         stock = await self.stock(c,now)
         if stock['estimated_units'] < 50:
@@ -396,7 +443,7 @@ class Controller:
             else:
                 await c.execute('''INSERT INTO profit_controller_actions(keyword_id,action,reason,before_bid,state)
                     VALUES($1,$2,$3,$4,'observed')''',kid,action,reason,bid)
-        payload = {'direct':stats,'queries':queries,'metrika':metric,'economics':econ,
+        payload = {'direct':stats,'queries':queries,'metrika':metric,'economics':econ,'returns_sync':return_sync,
                    'attribution':{'real_yclid_orders':sum(bool((value_json(r['attribution']) or {}).get('yclid')) for r in orders)},
                    'live_writes':self.writes,'stock':{'units':None,'basis':'owner estimate 700; authoritative inventory not connected'}}
         payload['stock'] = stock
@@ -456,7 +503,7 @@ class Controller:
                  f"Показы: {e['impressions']} | Клики: {e['clicks']} | CTR: {fmt(e['ctr'])}%",
                  f"Расход (с НДС): {fmt(e['spend'])} ₽ | CPC: {fmt(e['cpc'])} ₽"]
         names = {'ordered':'Заказано','paid':'Оплачено','in_transit':'В пути','ready':'В ПВЗ',
-                 'received':'Получено','canceled':'Отменено','returned':'Возвращено'}
+                 'received':'Получено','canceled':'Отменено','returned':'Возврат получен продавцом','return_pending':'Возврат в процессе'}
         for k,n in names.items():
             v=e['counts'][k]; lines.append(f"{n}: {v['units']} шт / {fmt(v['rub'])} ₽ ({v['orders']} заказов)")
         for k in ('ordered','paid','received'): lines.append(f"CR {k}: {fmt(e['cr'][k])}% | CAC: {fmt(e['cac'][k])} ₽")
@@ -488,7 +535,9 @@ class Controller:
                             await self.hourly(c,now,paused)
                             await self.weekly(c,now)
                             await self.daily_shipments(c,now)
-                            self.status={'state':'running','checked_at':now.isoformat(),'live_writes':self.writes,'campaign':CAMPAIGN}
+                            self.status={'state':'running','checked_at':now.isoformat(),'live_writes':self.writes,'campaign':CAMPAIGN,
+                                         'min_bid_rub':float(MIN_BID),'max_bid_rub':float(MAX_BID),
+                                         'daily_spend_cap_rub':10000,'ordinary_cooldown_hours':2}
                             await self.put(c,'health',self.status)
                         finally:
                             await c.fetchval('SELECT pg_advisory_unlock($1)',LOCK)
