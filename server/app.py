@@ -3,9 +3,13 @@ from urllib.parse import urljoin, urlsplit
 
 import asyncpg
 import httpx
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from customer_messages import STATUS_LABELS, email_ready, send_customer_email, production_email_allowed, send_resend_test, EmailDeliveryRejected
+from paid_metrika import paid_conversion, conversion_csv
+from profit_controller import Controller
 
 OZON_TOKEN_URL = "https://xapi.ozon.ru/oauth/token"
 OZON_API_BASE = "https://api-delivery.ozon.ru/"
@@ -26,6 +30,9 @@ app = FastAPI(title="Snoved Ozon Delivery Gateway", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://xn--163-5cdt3dgrs.xn--p1ai",
+        "https://www.xn--163-5cdt3dgrs.xn--p1ai",
+        "https://myshop-ddv761.myinsales.ru",
         "https://www.snoved-ai.ru",
         "https://snoved-ai.ru",
         "http://127.0.0.1:8765",
@@ -45,6 +52,9 @@ _points_cache_at = 0.0
 _points_lock = asyncio.Lock()
 db = None
 _sync_task = None
+_payment_task = None
+_profit_task = None
+_profit_controller = None
 
 def _safe_origin(url: str):
     p = urlsplit(url)
@@ -381,7 +391,7 @@ class DeliveryStatusIn(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    global db, _sync_task
+    global db, _sync_task, _payment_task, _profit_task, _profit_controller
     if DATABASE_URL:
         db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
         async with db.acquire() as c:
@@ -458,6 +468,10 @@ async def startup():
                 )
             """)
         _sync_task = asyncio.create_task(_background_sync_loop())
+        _payment_task = asyncio.create_task(_background_payment_reconciliation())
+        if os.getenv('PROFIT_CONTROLLER_ENABLED', '').lower() == 'true':
+            _profit_controller = Controller(db, _http)
+            _profit_task = asyncio.create_task(_profit_controller.loop())
 
     if PII_FUNCTION_URL and PII_INTERNAL_KEY:
         try:
@@ -471,16 +485,33 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _sync_task
-    if _sync_task:
-        _sync_task.cancel()
+    global _sync_task, _payment_task, _profit_task
+    for task in (_sync_task, _payment_task, _profit_task):
+        if not task:
+            continue
+        task.cancel()
         try:
-            await _sync_task
+            await task
         except asyncio.CancelledError:
             pass
     await _http.aclose()
     if db:
         await db.close()
+
+@app.get('/api/internal/commerce/controller-audit', include_in_schema=False)
+async def controller_audit(x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY, x_internal_key):
+        raise HTTPException(403, 'Forbidden')
+    if not _profit_controller:
+        return {'state': 'disabled', 'live_writes': False}
+    async with db.acquire() as c:
+        await _profit_controller.schema(c)
+        snapshots = await c.fetch('SELECT hour FROM profit_controller_snapshots ORDER BY hour DESC LIMIT 5')
+        states = await c.fetch('SELECT key,value,updated_at FROM profit_controller_state ORDER BY key')
+        counts = await c.fetch('SELECT state,count(*) AS count FROM profit_controller_actions GROUP BY state')
+    return {'runtime': _profit_controller.status, 'snapshots': [dict(r) for r in snapshots],
+            'states': [dict(r) for r in states], 'actions': [dict(r) for r in counts]}
 
 @app.get("/health")
 async def health():
@@ -496,29 +527,39 @@ async def health():
         "db_configured": bool(DATABASE_URL),
         "pii_configured": bool(PII_FUNCTION_URL and PII_INTERNAL_KEY),
         "real_ozon_create_enabled": bool(ENABLE_REAL_OZON_CREATE),
+        "payment_reconciliation_running": bool(_payment_task and not _payment_task.done()),
         "points_cached": int(cached or 0),
         "sync_complete": sync_complete,
     }
 
 @app.get("/api/ozon/points")
-async def points(query: str = Query(min_length=2, max_length=100), limit: int = Query(30, ge=1, le=50)):
+async def points(query: str = Query(min_length=2, max_length=100), city: str = Query(default="", max_length=100), limit: int = Query(30, ge=1, le=50)):
     if not db:
         raise HTTPException(503, "Database is not configured")
     q = " ".join(query.split())
-    like = "%" + q + "%"
+    # Match street and house separately: Ozon uses punctuation between them.
+    tokens = q.replace(",", " ").split()
+    patterns = ["%" + t.replace("%", "\\%").replace("_", "\\_") + "%" for t in tokens]
+    city_like = "%" + city.strip().replace("%", "\\%").replace("_", "\\_") + "%"
     async with db.acquire() as c:
         count = await c.fetchval("""
             SELECT COUNT(*) FROM ozon_delivery_points_cache
-            WHERE is_active=TRUE AND (point_address ILIKE $1 OR point_name ILIKE $1)
-        """, like)
+            WHERE is_active=TRUE AND point_type='pvz'
+              AND jsonb_array_length(shipment_method_ids)>0
+              AND (coalesce(point_address,'') || ' ' || coalesce(point_name,'')) ILIKE ALL($1::text[])
+              AND ($2='%%' OR point_address ILIKE $2)
+        """, patterns, city_like)
         rows = await c.fetch("""
             SELECT delivery_point_id, shipment_method_ids, point_name, point_address, point_type,
                    latitude, longitude, storage_period_days, schedule
             FROM ozon_delivery_points_cache
-            WHERE is_active=TRUE AND (point_address ILIKE $1 OR point_name ILIKE $1)
+            WHERE is_active=TRUE AND point_type='pvz'
+              AND jsonb_array_length(shipment_method_ids)>0
+              AND (coalesce(point_address,'') || ' ' || coalesce(point_name,'')) ILIKE ALL($1::text[])
+              AND ($2='%%' OR point_address ILIKE $2)
             ORDER BY updated_at DESC
-            LIMIT $2
-        """, like, limit)
+            LIMIT $3
+        """, patterns, city_like, limit)
     return {"query": query, "count": int(count or 0), "items": [_cache_row_to_point(r) for r in rows]}
 
 
@@ -804,7 +845,8 @@ async def yookassa_payment_status(payment_id: str, x_internal_key: str | None = 
 
 # Native InSales payment reconciliation. Bindings require trusted internal access.
 from decimal import Decimal
-from payment_validation import validate_payment
+from payment_validation import validate_payment, native_order_number, can_replace_unpaid_attempt
+from native_order_proof import verify_native_proof
 
 class NativePaymentBinding(BaseModel):
     order_id: int = Field(gt=0)
@@ -847,8 +889,482 @@ async def _payment_schema():
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
                 CREATE INDEX IF NOT EXISTS insales_yoo_order_idx ON insales_yookassa_payments(order_id);
                 CREATE TABLE IF NOT EXISTS insales_yookassa_unbound_events (
-                payment_id TEXT PRIMARY KEY, status TEXT, observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW());''')
+                payment_id TEXT PRIMARY KEY, status TEXT, observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+                CREATE TABLE IF NOT EXISTS commerce_pending_orders (
+                internal_order_token TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                quantity INT NOT NULL, amount NUMERIC(12,2) NOT NULL, snapshot JSONB NOT NULL,
+                order_key TEXT UNIQUE, order_id BIGINT UNIQUE, order_number BIGINT UNIQUE,
+                payment_id TEXT UNIQUE, payment_status TEXT NOT NULL DEFAULT 'pending',
+                shipment_state TEXT NOT NULL DEFAULT 'not_created', shipment_id TEXT,
+                shipment_idempotency_key TEXT NOT NULL, shipment_response JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());''')
+            await c.execute('''ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS tracking_number TEXT;
+                ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS ozon_status TEXT;
+                ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS status_checked_at TIMESTAMPTZ;
+                ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS post_purchase_failures INT NOT NULL DEFAULT 0;
+                CREATE TABLE IF NOT EXISTS commerce_service_messages (
+                order_id BIGINT NOT NULL,kind TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',
+                attempts INT NOT NULL DEFAULT 0,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY(order_id,kind));''')
+            await c.execute('''CREATE TABLE IF NOT EXISTS commerce_paid_conversions (
+                order_id BIGINT PRIMARY KEY, payment_id TEXT UNIQUE NOT NULL,
+                payload JSONB NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+                attempts INT NOT NULL DEFAULT 0, upload_id TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());''')
         _payment_schema_ready = True
+
+class AttributionIn(BaseModel):
+    yclid: str | None = Field(default=None, pattern=r'^\d{1,100}$')
+    client_id: str | None = Field(default=None, pattern=r'^\d{1,100}$')
+    utm_source: str | None = Field(default=None, max_length=250)
+    utm_medium: str | None = Field(default=None, max_length=250)
+    utm_campaign: str | None = Field(default=None, max_length=250)
+    utm_content: str | None = Field(default=None, max_length=250)
+    utm_term: str | None = Field(default=None, max_length=250)
+
+class PendingOrderIn(BaseModel):
+    session_id: uuid.UUID
+    attribution: AttributionIn | None = None
+    quantity: int = Field(ge=1, le=100)
+    product_id: int
+    variant_id: int
+    recipient_name: str = Field(min_length=2, max_length=250)
+    phone: str = Field(pattern=r'^\+7\d{10}$')
+    email: str = Field(min_length=5, max_length=250)
+    pickup_point_id: int = Field(gt=0)
+    pickup_city: str = Field(min_length=2, max_length=250)
+
+class NativeOrderLinkIn(BaseModel):
+    internal_order_token: str = Field(pattern=r'^[a-f0-9]{64}$')
+    order_key: str = Field(pattern=r'^[A-Za-z0-9_-]{16,200}$')
+
+@app.post('/api/commerce/pending', include_in_schema=False)
+async def create_pending_order(body: PendingOrderIn):
+    if body.product_id != 1825508753 or body.variant_id != 2184195121 or '@' not in body.email:
+        raise HTTPException(422, 'Invalid product or recipient')
+    await _payment_schema()
+    async with db.acquire() as c:
+        point = await c.fetchrow('SELECT * FROM ozon_delivery_points_cache WHERE delivery_point_id=$1 AND is_active=true', body.pickup_point_id)
+        if not point:
+            raise HTTPException(422, 'Active Ozon pickup point required')
+        methods = _json_value(point['shipment_method_ids'], [])
+        if not methods:
+            raise HTTPException(422, 'Ozon shipment method unavailable')
+        import secrets
+        token = secrets.token_hex(32)
+        snapshot = body.model_dump(mode='json')
+        snapshot.update(internal_order_token=token, pickup_title=point['point_name'],
+                        pickup_address=point['point_address'], delivery_point_id=body.pickup_point_id,
+                        shipment_method_ids=methods, product='Съёмная ручка для сковороды',
+                        unit_price=800, delivery_price=0)
+        await c.execute('''INSERT INTO commerce_pending_orders
+            (internal_order_token,session_id,quantity,amount,snapshot,shipment_idempotency_key)
+            VALUES($1,$2,$3,$4,$5::jsonb,$6)''', token, str(body.session_id), body.quantity,
+            Decimal(body.quantity)*800, json.dumps(snapshot), str(uuid.uuid4()))
+    return {'ok': True, 'internal_order_token': token, 'amount': body.quantity*800,
+            'pickup_address': snapshot['pickup_address']}
+
+@app.post('/api/commerce/link-order', include_in_schema=False)
+async def link_native_order(body: NativeOrderLinkIn):
+    await _payment_schema()
+    async with db.acquire() as c:
+        row = await c.fetchrow('SELECT * FROM commerce_pending_orders WHERE internal_order_token=$1', body.internal_order_token)
+    if not row:
+        raise HTTPException(404, 'Pending record not found')
+    if row['order_key'] and row['order_key'] != body.order_key:
+        raise HTTPException(409, 'Native order binding is immutable')
+    # Never accept an arbitrary URL or browser-supplied order number. Fixed host and opaque key only.
+    origin = 'https://xn--163-5cdt3dgrs.xn--p1ai'
+    url = origin + '/client_account/client_order?key=' + body.order_key
+    async with httpx.AsyncClient(timeout=25, follow_redirects=False) as client:
+        for _ in range(3):
+            response = await client.get(url)
+            if response.status_code not in (301,302,303,307,308):
+                break
+            target = urljoin(url, response.headers.get('location', ''))
+            if _safe_origin(target) != _safe_origin(origin) or urlsplit(target).path not in (
+                    '/orders/' + body.order_key, '/client_account/orders/' + body.order_key):
+                raise HTTPException(409, 'Native order is not available for verification')
+            url = target
+    if response.status_code != 200 or len(response.content) > 2000000:
+        raise HTTPException(409, 'Native order verification unavailable')
+    try:
+        order_id, number = verify_native_proof(response.json(), row, body.order_key)
+    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+        # Only fixed verification errors; never print native order/gateway configuration.
+        import logging
+        logging.warning('Native proof rejected: %s', str(exc) if isinstance(exc, ValueError) else type(exc).__name__)
+        raise HTTPException(409, 'Native order proof does not match pending record')
+    async with db.acquire() as c:
+        async with c.transaction():
+            locked = await c.fetchrow('SELECT * FROM commerce_pending_orders WHERE internal_order_token=$1 FOR UPDATE', body.internal_order_token)
+            if locked['order_key'] and (locked['order_key'] != body.order_key or locked['order_number'] != number):
+                raise HTTPException(409, 'Native order binding is immutable')
+            await c.execute('UPDATE commerce_pending_orders SET order_key=$2,order_id=$3,order_number=$4,updated_at=NOW() WHERE internal_order_token=$1', body.internal_order_token, body.order_key, order_id, number)
+    asyncio.create_task(_discover_native_payment(number))
+    return {'ok': True, 'order_number': number}
+
+async def _discover_native_payment(number):
+    # The native payment is created after the order response. A short bounded poll fills its reference.
+    for _ in range(24):
+        try:
+            data = await _yookassa_read('payments?limit=100', INTERNAL_KEY)
+            candidates = [p for p in data.get('items', []) if native_order_number(p) == number and p.get('status') != 'canceled']
+            if len(candidates) == 1 and await _register_pending_payment(candidates[0]):
+                if candidates[0].get('status') == 'succeeded' and candidates[0].get('paid') is True:
+                    await yookassa_notification(YooNotification(type='notification', event='payment.succeeded', object={'id': candidates[0]['id']}))
+                return
+        except Exception:
+            pass  # Do not log provider payloads or credentials.
+        await asyncio.sleep(5)
+
+@app.get('/api/internal/commerce/pending-audit', include_in_schema=False)
+async def pending_audit(x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY, x_internal_key):
+        raise HTTPException(403, 'Forbidden')
+    await _payment_schema()
+    async with db.acquire() as c:
+        rows = await c.fetch('''SELECT order_id,order_number,payment_id,quantity,amount,
+            payment_status,shipment_state,shipment_id,created_at FROM commerce_pending_orders ORDER BY created_at DESC LIMIT 20''')
+    return {'items': [dict(r) for r in rows]}
+
+async def _register_pending_payment(payment):
+    number = native_order_number(payment)
+    if not number:
+        return False
+    async with db.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow('SELECT * FROM commerce_pending_orders WHERE order_number=$1 AND order_key IS NOT NULL FOR UPDATE', number)
+            if not row:
+                return False
+            expected = {'payment_id': payment['id'], 'order_number': number, 'amount': row['amount']}
+            error = validate_payment(payment, expected, os.getenv('YOOKASSA_SHOP_ID', ''))
+            if error and error != 'not_paid':
+                return False
+            if row['payment_id'] and row['payment_id'] != payment['id']:
+                previous = await _yookassa_read('payments/' + row['payment_id'], INTERNAL_KEY)
+                if not can_replace_unpaid_attempt(previous, payment):
+                    return False
+            snapshot = _json_value(row['snapshot'], {})
+            snapshot.update(order_id=row['order_id'], order_number=number, payment_id=payment['id'])
+            await c.execute('''INSERT INTO insales_yookassa_payments
+                (payment_id,order_id,order_number,quantity,amount,order_snapshot)
+                VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(payment_id) DO NOTHING''',
+                payment['id'], row['order_id'], number, row['quantity'], row['amount'], json.dumps(snapshot))
+            await c.execute('UPDATE commerce_pending_orders SET payment_id=$2,payment_status=$3,updated_at=NOW() WHERE internal_order_token=$1 AND (payment_id IS DISTINCT FROM $2 OR payment_status IS DISTINCT FROM $3)',
+                row['internal_order_token'], payment['id'], payment['status'])
+    return True
+
+async def _background_payment_reconciliation():
+    # Native OAuth payments may notify InSales rather than this merchant URL.
+    # Recover through the same API-verified, idempotent paid handler.
+    await _payment_schema()
+    while True:
+        try:
+            async with db.acquire() as c:
+                rows = await c.fetch('''SELECT order_number FROM commerce_pending_orders
+                    WHERE order_key IS NOT NULL AND (payment_status <> 'succeeded'
+                    OR ($1 AND shipment_id IS NULL)) ''', ENABLE_REAL_OZON_CREATE)
+                numbers = {r['order_number'] for r in rows}
+            if numbers:
+                cursor = None
+                while True:
+                    path = 'payments?limit=100' + ('&cursor=' + cursor if cursor else '')
+                    data = await _yookassa_read(path, INTERNAL_KEY)
+                    for payment in data.get('items', []):
+                        if native_order_number(payment) in numbers and payment.get('status') == 'succeeded' and payment.get('paid') is True:
+                            await yookassa_notification(YooNotification(type='notification',event='payment.succeeded',object={'id':payment['id']}))
+                            print('PAYMENT_RECONCILED order=' + str(native_order_number(payment)))
+                    cursor = data.get('next_cursor')
+                    if not cursor:
+                        break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print('PAYMENT_RECONCILIATION_FAILED type=' + type(exc).__name__)
+        try:
+            await _sync_post_purchase()
+        except Exception as exc:
+            print('POST_PURCHASE_SYNC_FAILED type=' + type(exc).__name__)
+        try:
+            await _sync_paid_metrika()
+        except Exception as exc:
+            print('PAID_METRIKA_SYNC_FAILED type=' + type(exc).__name__)
+        await asyncio.sleep(60)
+
+async def _sync_paid_metrika():
+    # Re-use the verified native-order/payment linkage, independent of redirect and fulfillment.
+    async with db.acquire() as c:
+        rows = await c.fetch('''SELECT p.* FROM commerce_pending_orders p
+            LEFT JOIN commerce_paid_conversions m ON m.order_id=p.order_id
+            WHERE p.payment_status='succeeded' AND p.order_id IS NOT NULL
+            AND p.order_key IS NOT NULL AND m.order_id IS NULL
+            AND (coalesce(p.snapshot->'attribution'->>'client_id','')<>''
+                 OR coalesce(p.snapshot->'attribution'->>'yclid','')<>'')''')
+    for row in rows:
+        try:
+            payment = await _yookassa_read('payments/' + row['payment_id'], INTERNAL_KEY)
+            conversion = paid_conversion(payment, row, _json_value(row['snapshot'], {}), os.getenv('YOOKASSA_SHOP_ID',''))
+        except (ValueError, HTTPException):
+            continue  # Unpaid, invalid linkage and missing identifiers never emit a conversion.
+        async with db.acquire() as c:
+            await c.execute('''INSERT INTO commerce_paid_conversions(order_id,payment_id,payload)
+                VALUES($1,$2,$3::jsonb) ON CONFLICT DO NOTHING''',row['order_id'],row['payment_id'],json.dumps(conversion))
+    counter = os.getenv('METRIKA_COUNTER_ID','')
+    oauth = os.getenv('METRIKA_OAUTH_TOKEN','')
+    if not counter.isdigit() or not oauth or os.getenv('METRIKA_PAID_ENABLED','false').lower() != 'true':
+        return
+    async with db.acquire() as c:
+        rows = await c.fetch("SELECT * FROM commerce_paid_conversions WHERE state IN ('pending','retry') AND attempts<5")
+    for row in rows:
+        async with db.acquire() as c:
+            claimed = await c.fetchval('''UPDATE commerce_paid_conversions SET state='claimed',attempts=attempts+1,updated_at=NOW()
+                WHERE order_id=$1 AND state IN ('pending','retry') AND attempts<5 RETURNING order_id''',row['order_id'])
+        if not claimed:
+            continue
+        state, upload_id = 'unknown', None
+        try:
+            conversion = _json_value(row['payload'],{})
+            async with httpx.AsyncClient(timeout=25) as client:
+                response = await client.post('https://api-metrika.yandex.net/management/v1/counter/' + counter + '/offline_conversions/upload',
+                    headers={'Authorization':'OAuth '+oauth},params={'comment':
+                        'paid order '+str(row['order_id'])+' product 1825508753 quantity '+str(conversion['quantity'])+' Съемная ручка для сковороды'},
+                    files={'file':('paid.csv',conversion_csv(conversion),'text/csv')})
+            if response.status_code in (200,201):
+                upload_id = response.json().get('uploading',{}).get('id')
+                if upload_id is not None:
+                    state = 'accepted'
+            elif response.status_code in (400,401,403,422,429):
+                state = 'retry'  # Explicit rejection: no import accepted.
+        except Exception:
+            pass  # Ambiguous timeout never blindly uploads twice; no secrets/provider bodies in logs.
+        async with db.acquire() as c:
+            await c.execute('''UPDATE commerce_paid_conversions SET state=$2,upload_id=$3,updated_at=NOW()
+                WHERE order_id=$1''',row['order_id'],state,str(upload_id) if upload_id is not None else None)
+    # Acceptance is not attribution proof: retain the provider's processing result.
+    async with db.acquire() as c:
+        uploads = await c.fetch("SELECT order_id,upload_id FROM commerce_paid_conversions WHERE state='accepted' AND upload_id IS NOT NULL")
+    for row in uploads:
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get('https://api-metrika.yandex.net/management/v1/counter/'+counter+
+                    '/offline_conversions/uploading/'+row['upload_id'],headers={'Authorization':'OAuth '+oauth})
+            if response.status_code != 200:
+                continue
+            status = response.json().get('uploading',{}).get('status')
+            if status in ('PROCESSED','LINKAGE_FAILURE'):
+                async with db.acquire() as c:
+                    await c.execute('UPDATE commerce_paid_conversions SET state=$2,updated_at=NOW() WHERE order_id=$1',
+                        row['order_id'],'processed' if status=='PROCESSED' else 'linkage_failure')
+        except httpx.HTTPError:
+            pass
+
+@app.get('/api/internal/commerce/metrika-audit', include_in_schema=False)
+async def metrika_audit(x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY,x_internal_key):
+        raise HTTPException(403,'Forbidden')
+    await _payment_schema()
+    async with db.acquire() as c:
+        rows = await c.fetch('''SELECT p.order_number,p.payment_status,
+            coalesce(p.snapshot->'attribution'->>'yclid','')<>'' AS has_yclid,
+            coalesce(p.snapshot->'attribution'->>'client_id','')<>'' AS has_client_id,
+            coalesce(p.snapshot->'attribution'->>'utm_source','')<>'' AS has_utm,
+            m.state,m.upload_id FROM commerce_pending_orders p
+            LEFT JOIN commerce_paid_conversions m ON m.order_id=p.order_id
+            ORDER BY p.created_at DESC LIMIT 20''')
+    return {'configured': bool(os.getenv('METRIKA_OAUTH_TOKEN','') and os.getenv('METRIKA_COUNTER_ID','')),
+            'enabled': os.getenv('METRIKA_PAID_ENABLED','false').lower()=='true','items':[dict(r) for r in rows]}
+
+async def _create_paid_ozon_shipment(payment_id):
+    # Only called after an API-verified payment. Legacy manually-bound orders never enter automation.
+    async with db.acquire() as c:
+        async with c.transaction():
+            row = await c.fetchrow('SELECT * FROM commerce_pending_orders WHERE payment_id=$1 FOR UPDATE', payment_id)
+            if not row:
+                return {'automated': False}
+            if row['payment_status'] != 'succeeded':
+                raise HTTPException(409, 'Verified paid status required')
+            if row['shipment_id']:
+                return {'shipment_id': row['shipment_id'], 'duplicate': True}
+            if not ENABLE_REAL_OZON_CREATE:
+                return {'automated': False, 'reason': 'real_create_disabled'}
+            if row['shipment_state'] == 'creating' and time.time() - row['updated_at'].timestamp() < 120:
+                raise HTTPException(503, 'Shipment creation already in progress')
+            await c.execute("UPDATE commerce_pending_orders SET shipment_state='creating',updated_at=NOW() WHERE payment_id=$1", payment_id)
+            snapshot = _json_value(row['snapshot'], {})
+    external_id = 'posuda-insales-' + str(row['order_id'])
+    # One parcel per item uses the existing single-item packaged dimensions without inventing a bulk size.
+    postings = []
+    for i in range(row['quantity']):
+        parcel = _parcel(i+1, int(snapshot['shipment_method_ids'][0]))
+        parcel.update(posting_external_id=external_id+'-'+str(i+1), description='Съёмная ручка для сковороды, 1 шт.')
+        postings.append(parcel)
+    payload = {'order_external_id': external_id,
+               'recipient': {'phone_number': snapshot['phone'], 'full_name': snapshot['recipient_name']},
+               'delivery': {'delivery_point': {'delivery_point_id': snapshot['pickup_point_id']}}, 'postings': postings}
+    try:
+        # Official Ozon contract requires a fresh quote with the same shipment parameters.
+        quote_postings = [{k: p[k] for k in ('request_id','shipment_method_id','cutoff_at','declared_value','dimensions')} for p in postings]
+        quote = await _ozon_post('/v1/order/checkout', {
+            'recipient': {'phone_number': snapshot['phone']},
+            'delivery': payload['delivery'], 'postings': quote_postings})
+        results = quote.get('results', [])
+        if len(results) != len(postings) or any(not item.get('posting') or item.get('error') for item in results):
+            raise HTTPException(409, 'Ozon shipping calculation failed')
+        result = await _ozon_post('/v1/order/create', payload, row['shipment_idempotency_key'])
+        shipment_id = result.get('order_number')
+        if not shipment_id:
+            raise HTTPException(502, 'Ozon returned no shipment identifier')
+    except Exception:
+        async with db.acquire() as c:
+            await c.execute("UPDATE commerce_pending_orders SET shipment_state='retry_same_key',updated_at=NOW() WHERE payment_id=$1", payment_id)
+        raise
+    async with db.acquire() as c:
+        await c.execute("UPDATE commerce_pending_orders SET shipment_state='created',shipment_id=$2,shipment_response=$3::jsonb,updated_at=NOW() WHERE payment_id=$1",
+            payment_id, str(shipment_id), json.dumps(result))
+    return {'shipment_id': str(shipment_id)}
+
+async def _owner_post_purchase_alert(row, detail):
+    async with db.acquire() as c:
+        claimed = await c.fetchval('''INSERT INTO commerce_service_messages(order_id,kind,state)
+            VALUES($1,'ozon_alert','claimed') ON CONFLICT DO NOTHING RETURNING order_id''',row['order_id'])
+    if not claimed:
+        return
+    state='unknown'
+    try:
+        response=await _http.post('https://api.telegram.org/bot'+os.environ['TELEGRAM_BOT_TOKEN']+'/sendMessage',
+            json={'chat_id':os.environ['OWNER_CHAT_ID'],'text':f"⚠️ ОПЛАЧЕННЫЙ ЗАКАЗ №{row['order_number']}\n{detail}\nПроверьте Ozon. Не создавайте повторное отправление без проверки."})
+        if response.status_code==200 and response.json().get('ok'):state='sent'
+    except Exception:
+        pass
+    async with db.acquire() as c:
+        await c.execute("UPDATE commerce_service_messages SET state=$2,updated_at=NOW() WHERE order_id=$1 AND kind='ozon_alert'",row['order_id'],state)
+
+async def _send_queued_customer_email(row,kind):
+    if not email_ready() or not production_email_allowed(row):return
+    async with db.acquire() as c:
+        claimed=await c.fetchval('''UPDATE commerce_service_messages SET state='claimed',attempts=attempts+1,updated_at=NOW()
+            WHERE order_id=$1 AND kind=$2 AND state IN ('pending','retry') AND attempts<3 RETURNING order_id''',row['order_id'],kind)
+    if not claimed:return
+    snapshot=_json_value(row['snapshot'],{})
+    state='unknown'
+    try:
+        await asyncio.to_thread(send_customer_email,snapshot['email'],row['order_number'],kind,row['tracking_number'])
+        state='sent'
+    except EmailDeliveryRejected:
+        # Explicit HTTP rejection means Resend did not accept the message: bounded retry is safe.
+        state='retry'
+    except Exception:
+        # A timeout after the API request may already have delivered the email. Never resend blindly.
+        pass
+    async with db.acquire() as c:
+        await c.execute('UPDATE commerce_service_messages SET state=$3,updated_at=NOW() WHERE order_id=$1 AND kind=$2',row['order_id'],kind,state)
+
+async def _sync_post_purchase():
+    async with db.acquire() as c:
+        rows=await c.fetch("SELECT * FROM commerce_pending_orders WHERE payment_status='succeeded' AND order_key IS NOT NULL")
+    for record in rows:
+        row=dict(record)
+        try:
+            if not row['shipment_id']:raise ValueError('shipment_missing')
+            tracking=row['tracking_number']
+            if not tracking:
+                response=_json_value(row['shipment_response'],{})
+                postings=response.get('postings',[])
+                if postings and len(postings)==row['quantity']:
+                    tracking=', '.join(p['posting_number'] for p in postings if p.get('posting_number'))
+                if not tracking:
+                    # Read only recovery by the immutable external order id; never recreate.
+                    cursor=None;matches=[]
+                    while True:
+                        result=await _ozon_post('/v1/posting/search',{'filters':{'created_at_from':row['created_at'].isoformat()},'pagination':{'limit':100,'cursor':cursor}})
+                        matches.extend(p for p in result.get('postings',[]) if p.get('order_external_id')=='posuda-insales-'+str(row['order_id']))
+                        cursor=result.get('next_cursor')
+                        if not cursor:break
+                    if len(matches)==row['quantity']:
+                        tracking=', '.join(p['posting_number'] for p in matches)
+                if not tracking:raise ValueError('tracking_missing')
+            numbers=tracking.split(', ')
+            info=await _ozon_post('/v1/posting/info',{'posting_numbers':numbers})
+            postings=info.get('postings',[])
+            if len(postings)!=row['quantity'] or {p.get('posting_number') for p in postings}!=set(numbers):raise ValueError('posting_missing')
+            snapshot=_json_value(row['snapshot'],{})
+            if any(p.get('order_number')!=row['shipment_id'] or
+                p.get('delivery',{}).get('delivery_point_id')!=snapshot['pickup_point_id'] for p in postings):
+                raise ValueError('posting_mismatch')
+            statuses={p.get('status','unknown') for p in postings}
+            if statuses=={'delivered'}:status='delivered'
+            elif statuses<={'in_delivery_point','delivered'}:status='in_delivery_point'
+            elif 'canceled' in statuses:status='canceled'
+            elif statuses & {'forming_failed','not_accepted_to_delivery'}:status='forming_failed'
+            elif len(statuses)==1:status=next(iter(statuses))
+            else:status='on_way'
+            row['tracking_number']=tracking
+            async with db.acquire() as c:
+                await c.execute('''UPDATE commerce_pending_orders SET tracking_number=$2,ozon_status=$3,
+                    status_checked_at=NOW(),post_purchase_failures=0 WHERE order_id=$1''',row['order_id'],tracking,status)
+                await c.execute("INSERT INTO commerce_service_messages(order_id,kind) VALUES($1,'paid_email') ON CONFLICT DO NOTHING",row['order_id'])
+                if status=='in_delivery_point':
+                    await c.execute("INSERT INTO commerce_service_messages(order_id,kind) VALUES($1,'ready_email') ON CONFLICT DO NOTHING",row['order_id'])
+            for kind in ('paid_email','ready_email'):
+                await _send_queued_customer_email(row,kind)
+        except Exception as exc:
+            async with db.acquire() as c:
+                failures=await c.fetchval('''UPDATE commerce_pending_orders SET post_purchase_failures=post_purchase_failures+1
+                    WHERE order_id=$1 RETURNING post_purchase_failures''',row['order_id'])
+            if failures>=3:await _owner_post_purchase_alert(row,'Ozon: отправление/номер/статус не подтверждён после повторных проверок.')
+
+class CustomerStatusIn(BaseModel):
+    order_key: str = Field(pattern=r'^[a-f0-9]{32}$')
+
+@app.post('/api/commerce/customer-status')
+async def customer_order_status(body: CustomerStatusIn):
+    await _payment_schema()
+    async with db.acquire() as c:
+        row=await c.fetchrow('''SELECT payment_status,tracking_number,ozon_status,status_checked_at
+            FROM commerce_pending_orders WHERE order_key=$1''',body.order_key)
+    if not row:raise HTTPException(404,'Order not found')
+    paid=row['payment_status']=='succeeded'
+    return JSONResponse({'paid':paid,'tracking_number':row['tracking_number'] if paid else None,
+        'status':row['ozon_status'] if paid else None,
+        'status_label':STATUS_LABELS.get(row['ozon_status'],'уточняется') if paid else None},
+        headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
+
+@app.get('/api/internal/commerce/post-purchase-audit',include_in_schema=False)
+async def post_purchase_audit(x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY,x_internal_key):raise HTTPException(403,'Forbidden')
+    await _payment_schema()
+    async with db.acquire() as c:
+        rows=await c.fetch('''SELECT order_number,tracking_number,ozon_status,status_checked_at,post_purchase_failures
+            FROM commerce_pending_orders WHERE payment_status='succeeded' ''')
+        messages=await c.fetch('SELECT order_id,kind,state,attempts FROM commerce_service_messages')
+    return {'email_transport':'resend','resend_configured':email_ready(),
+        'production_email_enabled':os.getenv('CUSTOMER_EMAIL_ENABLED','').lower()=='true',
+        'email_start_at':os.getenv('CUSTOMER_EMAIL_START_AT'),
+        'orders':[dict(r) for r in rows],'messages':[dict(r) for r in messages]}
+
+@app.post('/api/internal/commerce/resend-test',include_in_schema=False)
+async def resend_test(x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY,x_internal_key):
+        raise HTTPException(403,'Forbidden')
+    if not email_ready():raise HTTPException(409,'Resend not configured')
+    await _payment_schema()
+    # A reserved service marker, not an InSales order. A durable claim prevents
+    # duplicate tests even after HTTP retries, restarts or ambiguous Resend API replies.
+    async with db.acquire() as c:
+        claimed=await c.fetchval('''INSERT INTO commerce_service_messages(order_id,kind,state,attempts)
+            VALUES(-1,'resend_test_20261002','claimed',1) ON CONFLICT DO NOTHING RETURNING order_id''')
+        if claimed is None:
+            state=await c.fetchval("SELECT state FROM commerce_service_messages WHERE order_id=-1 AND kind='resend_test_20261002'")
+            return {'state':state,'already_attempted':True}
+    result=await asyncio.to_thread(send_resend_test)
+    async with db.acquire() as c:
+        await c.execute("UPDATE commerce_service_messages SET state=$1,updated_at=NOW() WHERE order_id=-1 AND kind='resend_test_20261002'",result['state'])
+    return result
 
 @app.post('/api/internal/yookassa/bind', include_in_schema=False)
 async def bind_native_payment(body: NativePaymentBinding, x_internal_key: str | None = Header(default=None)):
@@ -871,13 +1387,16 @@ async def bind_native_payment(body: NativePaymentBinding, x_internal_key: str | 
     return {'ok': True, 'payment_id': payment_id, 'order_id': body.order_id}
 
 @app.post('/api/yookassa/notifications', include_in_schema=False)
-async def yookassa_notification(body: YooNotification):
+async def yookassa_notification(body: YooNotification, request: Request = None):
+    if request is not None:
+        print('YOOKASSA_WEBHOOK_RECEIVED event=' + body.event + ' payment_id=' + str(body.object.id))
     if body.type != 'notification' or body.event not in ('payment.succeeded', 'payment.canceled'):
         return {'ok': True, 'ignored': True}
     payment_id = str(body.object.id)
     # A webhook body is not evidence of payment: re-fetch with server credentials.
     payment = await _yookassa_read('payments/' + payment_id, INTERNAL_KEY)
     await _payment_schema()
+    await _register_pending_payment(payment)
     token = os.getenv('TELEGRAM_BOT_TOKEN', '')
     owner = os.getenv('OWNER_CHAT_ID', '')
     async with db.acquire() as c:
@@ -894,13 +1413,19 @@ async def yookassa_notification(body: YooNotification):
                     payment_id, 'canceled' if payment.get('status') == 'canceled' else 'pending', error)
                 return {'ok': True, 'processed': False, 'reason': error}
             if row['notification_state'] != 'not_sent':
-                return {'ok': True, 'duplicate': True}
+                duplicate = True
+            else:
+                duplicate = False
             if not token or not owner:
                 raise HTTPException(503, 'Owner notification channel is not configured')
             # Commit the claim BEFORE the external send. Ambiguous sends never retry automatically.
-            await c.execute("UPDATE insales_yookassa_payments SET status='succeeded',notification_state='claimed',error_code=NULL,updated_at=NOW() WHERE payment_id=$1", payment_id)
+            if not duplicate:
+                await c.execute("UPDATE insales_yookassa_payments SET status='succeeded',notification_state='claimed',error_code=NULL,updated_at=NOW() WHERE payment_id=$1", payment_id)
             snapshot = json.loads(row['order_snapshot']) if isinstance(row['order_snapshot'], str) else row['order_snapshot']
             amount = str(row['amount'])
+    if duplicate:
+        shipment = await _create_paid_ozon_shipment(payment_id)
+        return {'ok': True, 'duplicate': True, 'shipment': shipment}
     message = ('✅ НОВЫЙ ОПЛАЧЕННЫЙ ЗАКАЗ\n\n'
         f"Заказ: №{snapshot['order_number']}\nОплачено: {amount} ₽\nКоличество: {snapshot['quantity']}\n"
         f"Получатель: {snapshot['recipient_name']}\nТелефон: {snapshot['phone']}\nEmail: {snapshot['email']}\n"
@@ -916,8 +1441,8 @@ async def yookassa_notification(body: YooNotification):
         pass  # Never log Telegram URLs: they contain the bot credential.
     async with db.acquire() as c:
         await c.execute('UPDATE insales_yookassa_payments SET notification_state=$2,notification_message_id=$3,updated_at=NOW() WHERE payment_id=$1', payment_id, state, message_id)
-    # No Ozon shipment, fulfillment, or review action is performed here.
-    return {'ok': True, 'verified_paid': True, 'notification_state': state}
+    shipment = await _create_paid_ozon_shipment(payment_id)
+    return {'ok': True, 'verified_paid': True, 'notification_state': state, 'shipment': shipment}
 
 @app.get('/api/internal/yookassa/processing/{payment_id}', include_in_schema=False)
 async def native_payment_processing(payment_id: uuid.UUID, x_internal_key: str | None = Header(default=None)):
