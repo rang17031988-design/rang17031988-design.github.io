@@ -237,14 +237,20 @@ async def _publish_pvz_batch(rows):
         point['cache_updated_at']=row['updated_at'].isoformat()
         points.append(point)
     if points:
-        result=await _pii_call('store_pvz_cache',{'points':points})
+        for attempt in range(3):
+            try:
+                result=await _pii_call('store_pvz_cache',{'points':points})
+                break
+            except HTTPException:
+                if attempt==2:raise
+                await asyncio.sleep(1+attempt)
         print(json.dumps({'event':'pvz_cache_published','source':'real_ozon_postgres_cache','stored':result.get('stored'),'ttl_seconds':result.get('ttl_seconds')}),flush=True)
 
 async def _export_pvz_catalog():
     exported=0
     try:
         # Seed the incident cities first, then the full real national catalogue.
-        queries=[(" AND point_address ILIKE $1",('%'+city+'%',)) for city in ('Самара','Москва','Казань')]+[('',())]
+        queries=[(" AND point_address ILIKE $1",('%'+city+'%',)) for city in ('Самара','Казань','Москва')]+[('',())]
         for suffix,args in queries:
             async with db.acquire() as c:
                 async with c.transaction(readonly=True):
