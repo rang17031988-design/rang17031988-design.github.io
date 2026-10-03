@@ -242,6 +242,13 @@ _schema_ready = False
 
 def handler(event, context):
     global _schema_ready
+    # Public, read-only route; all existing PII actions retain their authentication.
+    if event.get('httpMethod')=='GET' and (event.get('queryStringParameters') or {}).get('action')=='pvz':
+        import pvz_transport
+        return pvz_transport.handler(event)
+    if event.get('httpMethod')=='POST' and (event.get('queryStringParameters') or {}).get('action')=='pvz_trace':
+        import pvz_transport
+        return pvz_transport.client_trace(event)
     try:
         raw = event.get("body") or "{}"
         if event.get("isBase64Encoded"):

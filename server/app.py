@@ -42,6 +42,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "X-Internal-Key"],
+    expose_headers=["X-PVZ-Request-ID", "Server-Timing"],
 )
 
 _http = httpx.AsyncClient(timeout=20.0, follow_redirects=False)
@@ -537,9 +538,55 @@ async def health():
         "sync_complete": sync_complete,
     }
 
+@app.middleware('http')
+async def pvz_request_logging(request: Request, call_next):
+    if request.url.path not in ('/api/ozon/points','/api/ozon/map-points'):
+        return await call_next(request)
+    pvz_diagnostics.start(request)
+    try:
+        response=await call_next(request)
+    except Exception as exc:
+        pvz_diagnostics.failure(request,type(exc).__name__)
+        raise
+    if response.status_code>=400: pvz_diagnostics.failure(request,'HTTP_'+str(response.status_code))
+    return response
+
+@app.post('/api/ozon/client-trace')
+async def pvz_client_trace(request: Request):
+    raw=await request.body()
+    if len(raw)>2048: raise HTTPException(413,'Trace too large')
+    try:
+        data=json.loads(raw)
+        request_id=str(uuid.UUID(data['pvz_request_id']))
+    except (ValueError,KeyError,TypeError): raise HTTPException(400,'Invalid trace')
+    allowed_stages={'start','response','filtered','rendered','timeout','network_error','render_error','superseded'}
+    if data.get('stage') not in allowed_stages: raise HTTPException(400,'Invalid stage')
+    entry={'event':'pvz_client_trace','pvz_request_id':request_id,'stage':data['stage'],'client_ua':request.headers.get('user-agent','')[:300]}
+    for key in ('raw_count','normalized_count','filtered_count','rendered_count','marker_count','elapsed_ms'):
+        if isinstance(data.get(key),(int,float)): entry[key]=max(0,min(data[key],1000000))
+    for key in ('error_code','timeout_source','transport'):
+        if key in data: entry[key]=str(data[key])[:50]
+    print(json.dumps(entry,ensure_ascii=False),flush=True)
+    return {'ok':True,'pvz_request_id':request_id}
+
+@app.get('/api/ozon/provider-diagnostic')
+async def pvz_provider_diagnostic(city: str, x_internal_key: str | None = Header(default=None)):
+    if not INTERNAL_KEY or x_internal_key!=INTERNAL_KEY: raise HTTPException(403,'Forbidden')
+    if city not in ('Самара','Москва','Казань'): raise HTTPException(400,'Invalid diagnostic city')
+    started=time.perf_counter()
+    async with db.acquire() as c:
+        count=await c.fetchval("SELECT count(*) FROM ozon_delivery_points_cache WHERE is_active=TRUE AND point_type='pvz' AND jsonb_array_length(shipment_method_ids)>0 AND point_address ILIKE $1",'%'+city+'%')
+        rows=await c.fetch("SELECT delivery_point_id,updated_at FROM ozon_delivery_points_cache WHERE is_active=TRUE AND point_type='pvz' AND jsonb_array_length(shipment_method_ids)>0 AND point_address ILIKE $1 ORDER BY updated_at DESC LIMIT 3",'%'+city+'%')
+    ozon_start=time.perf_counter()
+    try:
+        data=await _ozon_post('/v1/delivery-point/info',{'delivery_point_ids':[r['delivery_point_id'] for r in rows]})
+        result={'ozon_http_status':200,'ozon_result_count':len(data.get('delivery_points',[])),'error_code':None}
+    except Exception as exc:
+        result={'ozon_http_status':None,'ozon_result_count':0,'error_code':type(exc).__name__}
+    return {'city':city,'pvz_count':count,'sample_ids':[r['delivery_point_id'] for r in rows],'cache_updated_at':[r['updated_at'].isoformat() for r in rows],'ozon_ms':round((time.perf_counter()-ozon_start)*1000,2),'total_ms':round((time.perf_counter()-started)*1000,2),**result}
+
 @app.get("/api/ozon/points")
 async def points(request: Request, query: str = Query(min_length=2, max_length=100), city: str = Query(default="", max_length=100), limit: int = Query(30, ge=1, le=50)):
-    pvz_diagnostics.start(request)
     if not db:
         raise HTTPException(503, "Database is not configured")
     q = " ".join(query.split())
@@ -581,7 +628,6 @@ async def map_points(
     east: float = Query(ge=-180, le=180),
     limit: int = Query(350, ge=1, le=600),
 ):
-    pvz_diagnostics.start(request)
     if north <= south:
         raise HTTPException(400, "Invalid latitude bounds")
     if not db:
@@ -601,14 +647,14 @@ async def map_points(
         pvz_diagnostics.stage(request,'pool_acquire')
         count = await c.fetchval(f"""
             SELECT COUNT(*) FROM ozon_delivery_points_cache
-            WHERE is_active=TRUE AND latitude BETWEEN $1 AND $3 AND {lon_where}
+            WHERE is_active=TRUE AND point_type='pvz' AND jsonb_array_length(shipment_method_ids)>0 AND latitude BETWEEN $1 AND $3 AND {lon_where}
         """, *args)
         pvz_diagnostics.stage(request,'count_query')
         rows = await c.fetch(f"""
             SELECT delivery_point_id, shipment_method_ids, point_name, point_address, point_type,
                    latitude, longitude, storage_period_days, schedule
             FROM ozon_delivery_points_cache
-            WHERE is_active=TRUE AND latitude BETWEEN $1 AND $3 AND {lon_where}
+            WHERE is_active=TRUE AND point_type='pvz' AND jsonb_array_length(shipment_method_ids)>0 AND latitude BETWEEN $1 AND $3 AND {lon_where}
             ORDER BY ((latitude-$5)*(latitude-$5) + (longitude-$6)*(longitude-$6))
             LIMIT $7
         """, *args, center_lat, center_lon, limit)
