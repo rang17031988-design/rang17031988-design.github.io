@@ -548,7 +548,7 @@ async def shutdown():
         await db.close()
 
 @app.get('/api/internal/commerce/controller-audit', include_in_schema=False)
-async def controller_audit(x_internal_key: str | None = Header(default=None)):
+async def controller_audit(preview: bool = False, x_internal_key: str | None = Header(default=None)):
     import hmac
     if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY, x_internal_key):
         raise HTTPException(403, 'Forbidden')
@@ -559,8 +559,13 @@ async def controller_audit(x_internal_key: str | None = Header(default=None)):
         snapshots = await c.fetch('SELECT hour FROM profit_controller_snapshots ORDER BY hour DESC LIMIT 5')
         states = await c.fetch('SELECT key,value,updated_at FROM profit_controller_state ORDER BY key')
         counts = await c.fetch('SELECT state,count(*) AS count FROM profit_controller_actions GROUP BY state')
+        report = None
+        if preview:
+            # Read the real cohort and provider report; never notify or create orders.
+            report = await _profit_controller.weekly(c, datetime.now(timezone.utc), preview=True)
     return {'runtime': _profit_controller.status, 'snapshots': [dict(r) for r in snapshots],
-            'states': [dict(r) for r in states], 'actions': [dict(r) for r in counts]}
+            'states': [dict(r) for r in states], 'actions': [dict(r) for r in counts],
+            'weekly_preview': report}
 
 @app.get("/health")
 async def health():
