@@ -1,5 +1,6 @@
 """TTL cache of public Ozon catalogue, pushed by authenticated existing Railway."""
 import datetime,json,math,re,time,uuid
+import ydb
 from pvz_transport import response
 
 SCHEMA='''CREATE TABLE IF NOT EXISTS public_ozon_pvz_cache (
@@ -36,7 +37,7 @@ def store(data,execute):
         fields=[('city','Utf8',city_key(city)),('id','Uint64',int(p['delivery_point_id'])),('geo','Utf8',f'{math.floor(lat)}:{math.floor(lon)}'),('addr','Utf8',p['full_address'].casefold()),('lat','Double',lat),('lon','Double',lon),('payload','Utf8',json.dumps(public,ensure_ascii=False)),('updated','Timestamp',updated),('expires','Timestamp',expires)]
         args=[]
         for name,typ,val in fields:
-            key=f'${name}{i}';declarations.append(f'DECLARE {key} AS {typ};');params[key]=val;args.append(key)
+            key=f'${name}{i}';declarations.append(f'DECLARE {key} AS {typ};');params[key]=ydb.TypedValue(val,getattr(ydb.PrimitiveType,typ));args.append(key)
         values.append('('+','.join(args)+')')
     if values:
         execute('\n'.join(declarations)+'\nUPSERT INTO public_ozon_pvz_cache (city_key,point_id,geo_key,address_norm,latitude,longitude,payload,updated_at,expires_at) VALUES '+','.join(values)+';',params)
@@ -49,7 +50,7 @@ def read(event,execute):
     except (ValueError,TypeError,AttributeError):rid=str(uuid.uuid4())
     try:
         kind=q.get('kind','points');limit=max(1,min(int(q.get('limit',50)),150 if kind=='map-points' else 50))
-        declarations=['DECLARE $limit AS Uint64;'];params={'$limit':limit};view='public_ozon_pvz_cache';where=['expires_at>CurrentUtcTimestamp()']
+        declarations=['DECLARE $limit AS Uint64;'];params={'$limit':ydb.TypedValue(limit,ydb.PrimitiveType.Uint64)};view='public_ozon_pvz_cache';where=['expires_at>CurrentUtcTimestamp()']
         if kind=='points':
             city=city_key(q.get('city',''));query=q.get('query','').strip().casefold()
             if len(query)<2 or len(query)>100 or len(city)>100: raise ValueError('INVALID_QUERY')

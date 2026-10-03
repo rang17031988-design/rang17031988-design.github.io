@@ -287,7 +287,9 @@ def handler(event, context):
             result=pvz_transport.diagnose_network()
         elif action == 'store_pvz_cache':
             import pvz_cache
-            result=pvz_cache.store(data,_execute)
+            try:result=pvz_cache.store(data,_execute)
+            except Exception as exc:
+                return _response(500,{'ok':False,'error':type(exc).__name__,'cache_error':str(exc)[:600]})
         else:
             return _response(400, {"ok":False,"error":"unknown_action"})
         return _response(200, result)

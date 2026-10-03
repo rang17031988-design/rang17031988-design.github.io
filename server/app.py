@@ -625,7 +625,7 @@ async def pvz_provider_diagnostic(city: str, x_internal_key: str | None = Header
 @app.post('/api/ozon/publish-cache')
 async def publish_pvz_cache(x_internal_key: str | None = Header(default=None)):
     global _pvz_export_task
-    if not INTERNAL_KEY or x_internal_key!=INTERNAL_KEY:raise HTTPException(403,'Forbidden')
+    if not x_internal_key or x_internal_key not in tuple(k for k in (INTERNAL_KEY,PII_INTERNAL_KEY) if k):raise HTTPException(403,'Forbidden')
     if not _pvz_export_task or _pvz_export_task.done():_pvz_export_task=asyncio.create_task(_export_pvz_catalog())
     return {'ok':True,'status':'running'}
 
