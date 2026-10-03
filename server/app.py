@@ -1,4 +1,5 @@
 import os, time, uuid, asyncio, json
+from datetime import datetime, timezone
 from urllib.parse import urljoin, urlsplit
 
 import asyncpg
@@ -57,6 +58,7 @@ _sync_task = None
 _payment_task = None
 _profit_task = None
 _profit_controller = None
+_pvz_export_task = None
 
 def _safe_origin(url: str):
     p = urlsplit(url)
@@ -226,6 +228,36 @@ def _cache_row_to_point(row):
         "schedule": _json_value(row["schedule"], []),
     }
 
+async def _publish_pvz_batch(rows):
+    today=datetime.now(timezone.utc).date().isoformat()
+    points=[]
+    for row in rows:
+        point=_cache_row_to_point(row)
+        point['schedule']=[d for d in point.get('schedule',[]) if d.get('date','')>=today][:1]
+        point['cache_updated_at']=row['updated_at'].isoformat()
+        points.append(point)
+    if points:
+        result=await _pii_call('store_pvz_cache',{'points':points})
+        print(json.dumps({'event':'pvz_cache_published','source':'real_ozon_postgres_cache','stored':result.get('stored'),'ttl_seconds':result.get('ttl_seconds')}),flush=True)
+
+async def _export_pvz_catalog():
+    exported=0
+    try:
+        # Seed the incident cities first, then the full real national catalogue.
+        queries=[(" AND point_address ILIKE $1",('%'+city+'%',)) for city in ('Самара','Москва','Казань')]+[('',())]
+        for suffix,args in queries:
+            async with db.acquire() as c:
+                async with c.transaction(readonly=True):
+                    cur=await c.cursor("SELECT * FROM ozon_delivery_points_cache WHERE is_active=TRUE AND point_type='pvz' AND jsonb_array_length(shipment_method_ids)>0 AND latitude IS NOT NULL AND longitude IS NOT NULL AND updated_at>NOW()-INTERVAL '48 hours'"+suffix,*args)
+                    while True:
+                        rows=await cur.fetch(100)
+                        if not rows:break
+                        await _publish_pvz_batch(rows);exported+=len(rows)
+                        await asyncio.sleep(.05)
+        print(json.dumps({'event':'pvz_cache_export_complete','exported':exported}),flush=True)
+    except Exception as exc:
+        print(json.dumps({'event':'pvz_cache_export_error','exported':exported,'error_code':type(exc).__name__}),flush=True)
+
 async def _sync_one_catalog_page(cursor):
     page = await _ozon_post("/v1/delivery-point/list", {"pagination": {"cursor": cursor, "limit": 100}})
     summaries = page.get("delivery_points") or []
@@ -281,6 +313,11 @@ async def _sync_one_catalog_page(cursor):
                       is_active=EXCLUDED.is_active,
                       updated_at=NOW()
                 """, records)
+                try:
+                    published=await c.fetch('SELECT * FROM ozon_delivery_points_cache WHERE delivery_point_id=ANY($1::bigint[]) AND is_active=TRUE AND point_type=\'pvz\' AND latitude IS NOT NULL AND longitude IS NOT NULL',[r[0] for r in records])
+                    await _publish_pvz_batch(published)
+                except Exception as exc:
+                    print(json.dumps({'event':'pvz_cache_publish_error','error_code':type(exc).__name__}),flush=True)
 
     next_cursor = page.get("next_cursor")
     if next_cursor == "":
@@ -584,6 +621,13 @@ async def pvz_provider_diagnostic(city: str, x_internal_key: str | None = Header
     except Exception as exc:
         result={'ozon_http_status':None,'ozon_result_count':0,'error_code':type(exc).__name__}
     return {'city':city,'pvz_count':count,'sample_ids':[r['delivery_point_id'] for r in rows],'cache_updated_at':[r['updated_at'].isoformat() for r in rows],'ozon_ms':round((time.perf_counter()-ozon_start)*1000,2),'total_ms':round((time.perf_counter()-started)*1000,2),**result}
+
+@app.post('/api/ozon/publish-cache')
+async def publish_pvz_cache(x_internal_key: str | None = Header(default=None)):
+    global _pvz_export_task
+    if not INTERNAL_KEY or x_internal_key!=INTERNAL_KEY:raise HTTPException(403,'Forbidden')
+    if not _pvz_export_task or _pvz_export_task.done():_pvz_export_task=asyncio.create_task(_export_pvz_catalog())
+    return {'ok':True,'status':'running'}
 
 @app.get("/api/ozon/points")
 async def points(request: Request, query: str = Query(min_length=2, max_length=100), city: str = Query(default="", max_length=100), limit: int = Query(30, ge=1, le=50)):

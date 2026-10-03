@@ -244,8 +244,8 @@ def handler(event, context):
     global _schema_ready
     # Public, read-only route; all existing PII actions retain their authentication.
     if event.get('httpMethod')=='GET' and (event.get('queryStringParameters') or {}).get('action')=='pvz':
-        import pvz_transport
-        return pvz_transport.handler(event)
+        import pvz_cache
+        return pvz_cache.read(event,_execute)
     if event.get('httpMethod')=='POST' and (event.get('queryStringParameters') or {}).get('action')=='pvz_trace':
         import pvz_transport
         return pvz_transport.client_trace(event)
@@ -282,6 +282,12 @@ def handler(event, context):
             result = _set_status(data)
         elif action == "health":
             result = {"ok":True,"db":"ydb","region":"ru-central1"}
+        elif action == 'pvz_network_diagnostic':
+            import pvz_transport
+            result=pvz_transport.diagnose_network()
+        elif action == 'store_pvz_cache':
+            import pvz_cache
+            result=pvz_cache.store(data,_execute)
         else:
             return _response(400, {"ok":False,"error":"unknown_action"})
         return _response(200, result)
