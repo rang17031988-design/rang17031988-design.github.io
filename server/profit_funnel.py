@@ -176,8 +176,8 @@ def funnel(events, sessions):
     visitor_split={k:{'sessions':0,'paid':0,'durations':[]} for k in ('new','returning')}
     for g in groups.values():
         s=g['session'];seg='/'.join([s['device_type'],s['os'],s['browser']])
-        cd=channel_device.setdefault(s['channel']+'/'+s['device_type']+'/'+s['os'],{'sessions':0,'paid':0,'checkout':0})
-        cd['sessions']+=1;cd['paid']+=int('PAYMENT_SUCCESS' in g['events']);cd['checkout']+=int('CHECKOUT_OPEN' in g['events'])
+        cd=channel_device.setdefault(s['channel']+'/'+s['device_type']+'/'+s['os'],{'sessions':0,'paid':0,'checkout':0,'buy':0})
+        cd['buy']+=int('BUY_BUTTON_CLICK' in g['events']);cd['sessions']+=1;cd['paid']+=int('PAYMENT_SUCCESS' in g['events']);cd['checkout']+=int('CHECKOUT_OPEN' in g['events'])
         vs=visitor_split['new' if s['new_visitor'] else 'returning'];vs['sessions']+=1;vs['paid']+=int('PAYMENT_SUCCESS' in g['events'])
         ds=[value(e['payload']).get('duration_sec') for e in g['all'] if e['name']=='SESSION_TIMING']
         ds=[x for x in ds if x is not None]
@@ -244,11 +244,22 @@ def money(rows, ad_spend, dispositions):
     before=revenue-cogs_received-tax-writeoff-Decimal(str(ad_spend))-Decimal(str(rf or 0))-Decimal(str(ro or 0))-Decimal(str(rr or 0))-Decimal(str(extras or 0))
     final=float(before) if all(v is not None for v in (rf,ro,rr,extras,total(outbound),refund_total)) else None
     denominator=stats['RECEIVED']['orders']
+    not_picked=[]
+    for r in rows:
+        d=dispositions.get(r['order_id'],{})
+        if not d.get('not_picked_up'):continue
+        costs=[r.get('yookassa'),r.get('ozon'),d.get('return_logistics'),d.get('extra_cost',0)]
+        known_costs=total(costs)
+        costs.append(d.get('attributed_ad_cost'))
+        loss=total(costs)
+        if d.get('condition') not in ('resellable','damaged'):loss=None
+        if loss is not None and d.get('condition')=='damaged':loss+=r['quantity']*230
+        not_picked.append({'order_id':r['order_id'],'loss_rub':loss,'known_non_ad_costs_rub':known_costs,'attributed_ad_cost':d.get('attributed_ad_cost'),'condition':d.get('condition') or 'UNKNOWN'})
     return {'statuses':{k:{**v,'rub':float(v['rub'])} for k,v in stats.items()},'cogs_unit':230,
             'cogs_received':float(cogs_received),'tax_received':float(tax),'writeoff':float(writeoff),
             'yookassa_actual':total(fees),'ozon_outbound_actual':total(outbound),'ozon_return_actual':rr,
             'extra_confirmed':extras,'advertising':float(ad_spend),'profit_before_unknown':float(before),
-            'refunds_actual':refund_total,
+            'refunds_actual':refund_total,'not_picked_up_loss':not_picked,
             'final_net_profit':final,'profit_per_received_order':final/denominator if final is not None and denominator else None,
             'quality':'PROVISIONAL' if final is None else 'CONFIRMED',
             'cac':{k:float(ad_spend)/stats[k]['orders'] if stats[k]['orders'] else None for k in ('ORDERED','PAID','RECEIVED')},
@@ -513,6 +524,7 @@ class ProfitFunnel:
                 labels='/'.join(d.get('name','UNKNOWN') for d in row['dimensions']);n=row['metrics'][0]
                 lines += [f"{labels}: {int(n)} sessions; {'LOW SAMPLE' if n<20 else 'CONFIRMED'}"]
             if command in ('devices','browsers'):lines += [json.dumps(f['segments'],ensure_ascii=False)]
+        if command=='returns':lines += ['NOT_PICKED_UP loss: '+json.dumps(e['not_picked_up_loss'],ensure_ascii=False),'Return condition UNKNOWN: '+str(e['return_condition_unknown'])]
         if command in ('today','yesterday','week','profit','orders','returns','stock'):
             lines+=['ПРОДАЖИ / ЭКОНОМИКА']
             lines += [f"{k}: {v['units']} шт / {v['rub']:.2f} ₽" for k,v in e['statuses'].items()]
@@ -571,13 +583,15 @@ class ProfitFunnel:
         async with self.pool.acquire() as c:
             state=await self.state(c,'telegram_offset') or {'value':0}
         data=await self.telegram('getUpdates',{'offset':state['value'],'timeout':0,'allowed_updates':['message']})
+        reports={}
         for update in data.get('result',[]):
             if self.owner_allowed(update):
                 command=((update['message'].get('text') or '').split(' ')[0].split('@')[0]).lstrip('/')
                 if command=='start':await self.send('command:'+str(update['update_id']),'Profit & Funnel Bot — только для владельца.\n'+' '.join('/'+x for x in COMMANDS))
                 elif command in COMMANDS:
                     period=command if command in ('today','yesterday','week') else '7d' if command in ('funnel','devices','browsers','speed','returns') else 'today'
-                    r=await self.report(period)
+                    if period not in reports:reports[period]=await self.report(period)
+                    r=reports[period]
                     await self.send('command:'+str(update['update_id']),self.text(r,command))
             async with self.pool.acquire() as c:
                 await self.put(c,'telegram_offset',{'value':update['update_id']+1})
@@ -596,6 +610,19 @@ class ProfitFunnel:
             opened=v['stages']['PVZ_PICKER_OPEN']
             if opened>=20 and ratio(v['stages']['PVZ_SELECTED'],opened)<20:
                 candidates['device-'+seg]=('WARNING',f'⚠️ Possible device PVZ problem: {seg}, выбор {v["stages"]["PVZ_SELECTED"]}/{opened}; смотрите 5–10 Webvisor sessions.')
+        for name,a in r['ads'].get('channels',{}).items():
+            matching=[v for k,v in f['channel_device'].items() if k.startswith(name+'/')]
+            visits=sum(v['sessions'] for v in matching);buys=sum(v.get('buy',0) for v in matching)
+            if a['clicks']>=30 and visits>=20 and not buys:
+                candidates['ad-no-buy-'+name]=('WARNING',f'⚠️ {name}: {a["clicks"]} clicks, {visits} measured sessions, no Buy. Check attribution and landing page; do not increase budget.')
+        if r['stock']['estimated_units']<100:candidates['stock']=('WARNING',f'⚠️ Estimated stock {r["stock"]["estimated_units"]}; confirm physical stock.')
+        desktop=[v for k,v in f['segments'].items() if k.startswith('DESKTOP/')]
+        base_n=sum(v['stages']['PVZ_PICKER_OPEN'] for v in desktop);base_ok=sum(v['stages']['PVZ_SELECTED'] for v in desktop)
+        if base_n>=20 and base_ok/base_n>=.5:
+            for key,v in f['segments'].items():
+                n=v['stages']['PVZ_PICKER_OPEN']
+                if key.startswith('MOBILE/') and n>=20 and v['stages']['PVZ_SELECTED']/n<.5*base_ok/base_n:
+                    candidates['relative-device-'+key]=('WARNING',f'⚠️ PVZ conversion in {key} is less than half desktop; inspect 5–10 sessions. LOW SAMPLE guard passed.')
         async with self.pool.acquire() as c:
             for key,(severity,text) in candidates.items():
                 row=await c.fetchrow('''INSERT INTO profit_funnel_alerts(key,severity,first_seen,last_seen,status)
@@ -615,7 +642,9 @@ class ProfitFunnel:
                     if locked:
                         try:
                             await self.observe(leader)
-                            try:await self.drain()
+                            try:
+                                await self.drain()
+                                self.status.pop('transport_error',None)
                             except Exception as exc:self.status['transport_error']=type(exc).__name__
                             if os.getenv('PROFIT_FUNNEL_BOT_TOKEN'):
                                 await self.commands()

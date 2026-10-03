@@ -92,4 +92,20 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(result['writeoff'],0)
         self.assertIsNone(result['final_net_profit'])
 
+    def test_paid_fee_is_expense_before_receipt(self):
+        r={'order_id':1,'quantity':1,'amount':800,'payment_status':'succeeded','ozon_status':'on_way','yookassa':15.2,'ozon':None,'returns_other':0}
+        self.assertAlmostEqual(money([r],59.31,{})['profit_before_unknown'],-74.51)
+        self.assertEqual(money([r],59.31,{})['tax_received'],0)
+
+    def test_refunds_outside_cohort_are_not_deducted(self):
+        r={'order_id':1,'quantity':1,'amount':800,'payment_status':'succeeded','ozon_status':'delivered','yookassa':15.2,'ozon':80,'returns_other':0}
+        self.assertAlmostEqual(money([r],100,{2:{'has_return':True,'refund_rub':800}})['final_net_profit'],326.8)
+
+    def test_not_picked_up_ad_cost_is_unknown_without_attribution(self):
+        r={'order_id':1,'quantity':1,'amount':800,'payment_status':'succeeded','ozon_status':'returned','yookassa':15.2,'ozon':80,'returns_other':None}
+        d={1:{'has_return':True,'not_picked_up':True,'condition':'resellable','return_logistics':70,'refund_rub':800}}
+        loss=money([r],0,d)['not_picked_up_loss'][0]
+        self.assertIsNone(loss['loss_rub'])
+        self.assertAlmostEqual(loss['known_non_ad_costs_rub'],165.2)
+
 if __name__=='__main__':unittest.main()

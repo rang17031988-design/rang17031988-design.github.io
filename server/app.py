@@ -609,6 +609,30 @@ async def analytics_report(period: str = 'yesterday', command: str = 'yesterday'
     report=await _funnel_worker.report(period)
     return {'report':report,'message':_funnel_worker.text(report,command),'worker':_funnel_worker.status}
 
+class ConfirmedReturnDisposition(BaseModel):
+    order_id: int = Field(gt=0)
+    condition: str
+    physically_confirmed: bool
+    not_picked_up: bool = False
+    return_logistics: float | None = Field(default=None,ge=0)
+    extra_cost: float = Field(default=0,ge=0)
+    refund_rub: float | None = Field(default=None,ge=0)
+
+@app.post('/api/internal/analytics/return-disposition', include_in_schema=False)
+async def confirmed_return(body: ConfirmedReturnDisposition,x_internal_key: str | None = Header(default=None)):
+    _operations_access(x_internal_key)
+    if not body.physically_confirmed or body.condition not in ('resellable','damaged'):
+        raise HTTPException(400,'Physical return inspection required')
+    async with db.acquire() as c:
+        if not await c.fetchval("SELECT EXISTS(SELECT 1 FROM profit_controller_returns WHERE order_id=$1 AND status='received')",body.order_id):
+            raise HTTPException(409,'Real received return required')
+        await c.execute('''INSERT INTO profit_funnel_return_dispositions(order_id,condition,not_picked_up,return_logistics,extra_cost,refund_rub,confirmed_at,source)
+            VALUES($1,$2,$3,$4,$5,$6,NOW(),'owner_physical_inspection') ON CONFLICT(order_id) DO UPDATE SET
+            condition=EXCLUDED.condition,not_picked_up=EXCLUDED.not_picked_up,return_logistics=EXCLUDED.return_logistics,
+            extra_cost=EXCLUDED.extra_cost,refund_rub=EXCLUDED.refund_rub,confirmed_at=NOW(),source=EXCLUDED.source''',
+            body.order_id,body.condition,body.not_picked_up,body.return_logistics,body.extra_cost,body.refund_rub)
+    return {'ok':True,'order_id':body.order_id,'condition':body.condition}
+
 @app.get('/api/internal/analytics/audit', include_in_schema=False)
 async def analytics_audit(x_internal_key: str | None = Header(default=None)):
     import hmac
