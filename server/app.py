@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, Response
 from customer_messages import STATUS_LABELS, email_ready, send_customer_email, production_email_allowed, send_resend_test, EmailDeliveryRejected
 from paid_metrika import paid_conversion, conversion_csv
 from profit_controller import Controller
+import pvz_diagnostics
 
 OZON_TOKEN_URL = "https://xapi.ozon.ru/oauth/token"
 OZON_API_BASE = "https://api-delivery.ozon.ru/"
@@ -537,7 +538,8 @@ async def health():
     }
 
 @app.get("/api/ozon/points")
-async def points(query: str = Query(min_length=2, max_length=100), city: str = Query(default="", max_length=100), limit: int = Query(30, ge=1, le=50)):
+async def points(request: Request, query: str = Query(min_length=2, max_length=100), city: str = Query(default="", max_length=100), limit: int = Query(30, ge=1, le=50)):
+    pvz_diagnostics.start(request)
     if not db:
         raise HTTPException(503, "Database is not configured")
     q = " ".join(query.split())
@@ -546,6 +548,7 @@ async def points(query: str = Query(min_length=2, max_length=100), city: str = Q
     patterns = ["%" + t.replace("%", "\\%").replace("_", "\\_") + "%" for t in tokens]
     city_like = "%" + city.strip().replace("%", "\\%").replace("_", "\\_") + "%"
     async with db.acquire() as c:
+        pvz_diagnostics.stage(request,'pool_acquire')
         count = await c.fetchval("""
             SELECT COUNT(*) FROM ozon_delivery_points_cache
             WHERE is_active=TRUE AND point_type='pvz'
@@ -553,6 +556,7 @@ async def points(query: str = Query(min_length=2, max_length=100), city: str = Q
               AND (coalesce(point_address,'') || ' ' || coalesce(point_name,'')) ILIKE ALL($1::text[])
               AND ($2='%%' OR point_address ILIKE $2)
         """, patterns, city_like)
+        pvz_diagnostics.stage(request,'count_query')
         rows = await c.fetch("""
             SELECT delivery_point_id, shipment_method_ids, point_name, point_address, point_type,
                    latitude, longitude, storage_period_days, schedule
@@ -564,17 +568,20 @@ async def points(query: str = Query(min_length=2, max_length=100), city: str = Q
             ORDER BY updated_at DESC
             LIMIT $3
         """, patterns, city_like, limit)
-    return {"query": query, "count": int(count or 0), "items": [_cache_row_to_point(r) for r in rows]}
+        pvz_diagnostics.stage(request,'points_query')
+    return pvz_diagnostics.response(request,{"query": query, "count": int(count or 0), "items": [_cache_row_to_point(r) for r in rows]})
 
 
 @app.get("/api/ozon/map-points")
 async def map_points(
+    request: Request,
     south: float = Query(ge=-90, le=90),
     west: float = Query(ge=-180, le=180),
     north: float = Query(ge=-90, le=90),
     east: float = Query(ge=-180, le=180),
     limit: int = Query(350, ge=1, le=600),
 ):
+    pvz_diagnostics.start(request)
     if north <= south:
         raise HTTPException(400, "Invalid latitude bounds")
     if not db:
@@ -591,10 +598,12 @@ async def map_points(
         lon_where = "(longitude >= $2 OR longitude <= $4)"
         args = [south, west, north, east]
     async with db.acquire() as c:
+        pvz_diagnostics.stage(request,'pool_acquire')
         count = await c.fetchval(f"""
             SELECT COUNT(*) FROM ozon_delivery_points_cache
             WHERE is_active=TRUE AND latitude BETWEEN $1 AND $3 AND {lon_where}
         """, *args)
+        pvz_diagnostics.stage(request,'count_query')
         rows = await c.fetch(f"""
             SELECT delivery_point_id, shipment_method_ids, point_name, point_address, point_type,
                    latitude, longitude, storage_period_days, schedule
@@ -603,7 +612,8 @@ async def map_points(
             ORDER BY ((latitude-$5)*(latitude-$5) + (longitude-$6)*(longitude-$6))
             LIMIT $7
         """, *args, center_lat, center_lon, limit)
-    return {"count": int(count or 0), "returned": len(rows), "items": [_cache_row_to_point(r) for r in rows]}
+        pvz_diagnostics.stage(request,'points_query')
+    return pvz_diagnostics.response(request,{"count": int(count or 0), "returned": len(rows), "items": [_cache_row_to_point(r) for r in rows]})
 
 @app.post("/api/ozon/refresh-points")
 async def refresh_points(x_internal_key: str | None = Header(default=None)):
