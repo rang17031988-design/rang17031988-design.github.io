@@ -18,6 +18,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import httpx
+import profit_presentation as presentation
 
 MSK = ZoneInfo('Europe/Moscow')
 UTC = timezone.utc
@@ -509,59 +510,11 @@ class ProfitFunnel:
         return result
 
     def text(self,r,command='today'):
-        f=r['instrumented_funnel'];e=r['economics'];fmt=lambda v:'UNKNOWN' if v is None else f'{v:.2f}' if isinstance(v,float) else str(v)
-        lines=[f"📊 Profit & Funnel — {r['start_msk'][:10]} / {r['period']}"]
-        if r['day_not_finished']:lines+=['DAY NOT FINISHED — текущий неполный день']
-        if command in ('today','yesterday','week','ads'):
-            lines+=['РЕКЛАМА (фактический расход с НДС)']
-            for name in ('YANDEX_SEARCH','YANDEX_RSYA'):
-                a=r['ads'].get('channels',{}).get(name)
-                lines += [f"{name}: показы {a['impressions']}, клики {a['clicks']}, расход {a['spend']:.2f} ₽, CTR {fmt(a['ctr'])}%, CPC {fmt(a['cpc'])} ₽" if a else name+': UNKNOWN']
-            m=r['metrika'].get('devices',{});totals=m.get('totals') or []
-            lines += [f"Метрика: sessions {fmt(totals[0] if totals else None)}, avg duration {fmt(totals[1] if len(totals)>1 else None)} сек."]
-        if command in ('today','yesterday','week','funnel'):
-            lines+=['ВОРОНКА (с новой instrumentation; исторические пробелы UNKNOWN)',f"Измеренные сессии {f['sessions']} — {f['quality']}"]
-            lines+=[' → '.join(f"{name}: {f['counts'][name] if f['sessions'] else 'UNKNOWN'}" for name in STAGES)]
-            biggest=f['biggest_drop'];lines+=[f"🎯 Главная потеря: {biggest['from']} → {biggest['to']}, {biggest['lost']} / {biggest['drop_percent']}%" if biggest else '🎯 Главная потеря: LOW SAMPLE']
-            lines += [f"Duration median {fmt(f['duration']['median'])}, avg {fmt(f['duration']['mean'])} сек.; buckets {f['duration_buckets']}"]
-            if command in ('funnel','today','yesterday','week'):
-                lines += [f'{x["from"]} → {x["to"]}: {x["end"]}/{x["start"]}, CR {fmt(x["conversion_percent"])}%, drop {fmt(x["drop_percent"])}% ({x["quality"]})' for x in f['drops'] if x['start']]
-                lines += [f'Time {k}: median {fmt(v["median"])} s, mean {fmt(v["mean"])} s, n={v["n"]}' for k,v in f['time_to_action'].items() if v['n']]
-                lines += ['Scroll 25/50/75/90: '+('/'.join(str(f['scroll'][str(n)]) for n in (25,50,75,90)) if f['sessions'] else 'UNKNOWN')]
-        if command in ('today','yesterday','week','devices','browsers'):
-            lines+=['УСТРОЙСТВА / БРАУЗЕРЫ (Метрика)']
-            for row in r['metrika'].get('devices',{}).get('rows',[])[:10]:
-                labels='/'.join(d.get('name','UNKNOWN') for d in row['dimensions']);n=row['metrics'][0]
-                lines += [f"{labels}: {int(n)} sessions; {'LOW SAMPLE' if n<20 else 'CONFIRMED'}"]
-            if command in ('devices','browsers'):lines += [json.dumps(f['segments'],ensure_ascii=False)]
-        if command=='returns':lines += ['NOT_PICKED_UP loss: '+json.dumps(e['not_picked_up_loss'],ensure_ascii=False),'Return condition UNKNOWN: '+str(e['return_condition_unknown'])]
-        if command in ('today','yesterday','week','profit','orders','returns','stock'):
-            lines+=['ПРОДАЖИ / ЭКОНОМИКА']
-            lines += [f"{k}: {v['units']} шт / {v['rub']:.2f} ₽" for k,v in e['statuses'].items()]
-            lines += [f"COGS:230 ₽/шт; полученные:{e['cogs_received']:.2f} ₽; налог RECEIVED:{e['tax_received']:.2f} ₽",
-                      f"YooKassa:{fmt(e['yookassa_actual'])} ₽; Ozon outbound:{fmt(e['ozon_outbound_actual'])}; return:{fmt(e['ozon_return_actual'])}",
-                      f"PROFIT BEFORE UNKNOWN COSTS:{e['profit_before_unknown']:.2f} ₽; FINAL:{fmt(e['final_net_profit'])} ({e['quality']})",
-                      f"CAC cohort:{e['cac']}; ROAS paid:{fmt(e['roas_paid'])}; ROMI:{fmt(e['romi'])}",
-                      'Когортные CAC/ROAS не доказывают атрибуцию рекламе.',
-                      f"Остаток ESTIMATED:{r['stock']['estimated_units']} шт / {r['stock']['valuation_rub']} ₽"]
-        if command in ('speed','today','yesterday','week'):
-            lines+=['LCP/INP/CLS/TTFB RUM; p75 n≥20']
-            for name,devices in f['speed'].items():
-                lines += [name+': '+ '; '.join(f'{k} p75={fmt(v["p75"])}, median={fmt(v["median"])}, n={v["n"]}' for k,v in devices.items() if v['n']) if any(v['n'] for v in devices.values()) else name+': UNKNOWN']
-        if command in ('errors','today','yesterday','week'):lines += [json.dumps({'client':f['errors'],'server':r['technical']},ensure_ascii=False)]
-        if command=='status':lines += ['Worker: '+json.dumps(self.status,ensure_ascii=False)]
-        if command in ('today','yesterday','week','status'):
-            lines += [f"🤖 Controller:{r['controller_actions']}",f"Техника: shipment failures {r['technical']['shipment_failures']}; клиентские ошибки {sum(f['errors'].values())}",
-                      f"Baseline:{r['comparison']['quality']}, дней {r['comparison']['days']}; lost revenue estimate:{fmt(r['estimated_lost_revenue'])}"]
-        if command in ('today','yesterday','week','devices','browsers','funnel'):
-            lines += [f'Channel/device {k}: {v["sessions"]} sessions, {v["paid"]} PAID, CR {fmt(v["paid_cr"])}% ({v["quality"]})' for k,v in f['channel_device'].items()]
-            lines += [f'{k}: {v["sessions"]} sessions, {v["paid"]} PAID; median duration {fmt(v["duration"]["median"])} s' for k,v in f['visitor_split'].items()]
-            lines += ['Early exits: '+'; '.join(f'{k}: {fmt(v["percent"])}%' for k,v in f['early_exit'].items())]
-            lines += [f'LCP {k}: {v["sessions"]} sessions, Buy {v["buy"]}, checkout {v["checkout"]}, PAID {v["paid"]} ({v["quality"]})' for k,v in f['performance_conversion'].items()]
-        return '\n'.join(lines)
+        return presentation.render(r,command,self.status)
 
     def owner_allowed(self,update):
-        m=update.get('message') or {};chat=m.get('chat') or {};sender=m.get('from') or {}
+        query=update.get('callback_query') or {}
+        m=update.get('message') or query.get('message') or {};chat=m.get('chat') or {};sender=query.get('from') or m.get('from') or {}
         owner=os.getenv('PROFIT_FUNNEL_OWNER_USER_ID') or os.getenv('OWNER_CHAT_ID','')
         destination=os.getenv('PROFIT_FUNNEL_OWNER_CHAT_ID') or os.getenv('OWNER_CHAT_ID','')
         return chat.get('type')=='private' and str(chat.get('id'))==destination and str(sender.get('id'))==owner and not sender.get('is_bot')
@@ -572,12 +525,13 @@ class ProfitFunnel:
         try:
             r=await self.http.post('https://api.telegram.org/bot'+token+'/'+method,json=payload)
             data=r.json()
+            if method=='editMessageText' and r.status_code==400 and 'message is not modified' in str(data.get('description','')).lower():return {'ok':True}
             return data if r.status_code==200 else {'ok':False,'error_code':str(r.status_code)}
         except Exception as exc:
             # Never log exception repr: HTTP exceptions contain credential-bearing URLs.
             return {'ok':False,'error_code':type(exc).__name__,'delivery_unknown':True}
 
-    async def send(self,key,text):
+    async def send(self,key,text,reply_markup=None):
         if not os.getenv('PROFIT_FUNNEL_BOT_TOKEN'):return False
         async with self.pool.acquire() as c:
             claimed=await c.fetchval("INSERT INTO profit_funnel_outbox(key,state) VALUES($1,'claimed') ON CONFLICT DO NOTHING RETURNING key",key)
@@ -587,7 +541,7 @@ class ProfitFunnel:
         ok=True;mid=None
         for i,chunk in enumerate(chunks):
             result=await self.telegram('sendMessage',{'chat_id':os.getenv('PROFIT_FUNNEL_OWNER_CHAT_ID') or os.getenv('OWNER_CHAT_ID'),
-                                                   'text':chunk,'disable_web_page_preview':True})
+                                                   'text':chunk,'disable_web_page_preview':True,**({'reply_markup':reply_markup} if reply_markup and i==len(chunks)-1 else {})})
             if not result.get('ok'):ok=False;break
             mid=result['result']['message_id']
         async with self.pool.acquire() as c:
@@ -595,20 +549,50 @@ class ProfitFunnel:
                             key,'sent' if ok else 'delivery_unknown' if result.get('delivery_unknown') else 'failed',mid,None if ok else str(result.get('error_code'))[:60])
         return ok
 
+    async def show(self,key,r,command,period,query=None,page=0):
+        content=presentation.pages(self.text(r,command))
+        page=max(0,min(page,len(content)-1))
+        text=content[page]
+        if len(content)>1:text+=f'\n\n📄 {page+1} / {len(content)}'
+        markup=presentation.keyboard(command,period,page,len(content))
+        if not query:return await self.send(key,text,markup)
+        async with self.pool.acquire() as c:
+            claimed=await c.fetchval("INSERT INTO profit_funnel_outbox(key,state) VALUES($1,'claimed') ON CONFLICT DO NOTHING RETURNING key",key)
+        if not claimed:return False
+        result=await self.telegram('editMessageText',{'chat_id':query['message']['chat']['id'],
+            'message_id':query['message']['message_id'],'text':text,'reply_markup':markup,'disable_web_page_preview':True})
+        async with self.pool.acquire() as c:
+            await c.execute('UPDATE profit_funnel_outbox SET state=$2,telegram_message_id=$3,error_code=$4,updated_at=NOW() WHERE key=$1',
+                key,'sent' if result.get('ok') else 'delivery_unknown' if result.get('delivery_unknown') else 'failed',
+                query['message']['message_id'],None if result.get('ok') else str(result.get('error_code'))[:60])
+        return result.get('ok',False)
+
     async def commands(self):
         async with self.pool.acquire() as c:
             state=await self.state(c,'telegram_offset') or {'value':0}
-        data=await self.telegram('getUpdates',{'offset':state['value'],'timeout':0,'allowed_updates':['message']})
+        data=await self.telegram('getUpdates',{'offset':state['value'],'timeout':0,'allowed_updates':['message','callback_query']})
         reports={}
         for update in data.get('result',[]):
+            query=update.get('callback_query')
+            if query:await self.telegram('answerCallbackQuery',{'callback_query_id':query['id']})
             if self.owner_allowed(update):
-                command=((update['message'].get('text') or '').split(' ')[0].split('@')[0]).lstrip('/')
-                if command=='start':await self.send('command:'+str(update['update_id']),'Profit & Funnel Bot — только для владельца.\n'+' '.join('/'+x for x in COMMANDS))
-                elif command in COMMANDS:
-                    period=command if command in ('today','yesterday','week') else '7d' if command in ('funnel','devices','browsers','speed','returns') else 'today'
+                period='today';page=0;command=None
+                if query:
+                    parts=str(query.get('data','')).split(':')
+                    if len(parts)==4 and parts[0]=='pf' and parts[1] in COMMANDS+['menu','behavior','attention'] and parts[2] in ('today','yesterday','week') and parts[3].isdigit():
+                        command,period,page=parts[1],parts[2],min(int(parts[3]),50)
+                else:
+                    command=((update['message'].get('text') or '').split(' ')[0].split('@')[0]).lstrip('/')
+                    if command in ('start','menu'):command='menu'
+                    if command in ('today','yesterday','week'):period=command
+                if command in COMMANDS+['menu','behavior','attention','debug','debug_last']:
                     if period not in reports:reports[period]=await self.report(period)
                     r=reports[period]
-                    await self.send('command:'+str(update['update_id']),self.text(r,command))
+                    if command in ('debug','debug_last'):
+                        debug={'runtime':self.status,'period':r['period'],'stages':r['instrumented_funnel']['counts'],
+                            'quality':r['instrumented_funnel']['quality'],'technical':r['technical']}
+                        await self.send('command:'+str(update['update_id']),'🔎 Диагностика для владельца\n'+json.dumps(debug,ensure_ascii=False,default=str)[:3000])
+                    else:await self.show(('callback:' if query else 'command:')+str(update['update_id']),r,command,period,query,page)
             async with self.pool.acquire() as c:
                 await self.put(c,'telegram_offset',{'value':update['update_id']+1})
 
@@ -645,7 +629,7 @@ class ProfitFunnel:
                     VALUES($1,$2,$3,$3,'OPEN') ON CONFLICT(key) DO UPDATE SET last_seen=EXCLUDED.last_seen,status='OPEN'
                     RETURNING last_sent''',key,severity,now)
                 if not row['last_sent'] or now-row['last_sent']>=timedelta(hours=6):
-                    sent=await self.send('alert:'+key+':'+now.strftime('%Y%m%d%H'),text)
+                    sent=await self.send('alert:'+key+':'+now.strftime('%Y%m%d%H'),presentation.alert_text(key,severity),presentation.keyboard('errors','today'))
                     if sent:await c.execute('UPDATE profit_funnel_alerts SET last_sent=$2 WHERE key=$1',key,now)
             await c.execute("UPDATE profit_funnel_alerts SET status='RESOLVED' WHERE status='OPEN' AND NOT(key=ANY($1::text[]))",list(candidates))
 
@@ -668,11 +652,11 @@ class ProfitFunnel:
                                 if local.hour>=9:
                                     key='daily:'+local.date().isoformat()
                                     if not await leader.fetchval('SELECT EXISTS(SELECT 1 FROM profit_funnel_outbox WHERE key=$1)',key):
-                                        r=await self.report('yesterday');await self.send(key,self.text(r,'yesterday'))
+                                        r=await self.report('yesterday');await self.show(key,r,'yesterday','yesterday')
                                 if local.weekday()==0 and (local.hour>9 or local.hour==9 and local.minute>=10):
                                     key='weekly:'+local.date().isoformat()
                                     if not await leader.fetchval('SELECT EXISTS(SELECT 1 FROM profit_funnel_outbox WHERE key=$1)',key):
-                                        r=await self.report('week');await self.send(key,self.text(r,'week'))
+                                        r=await self.report('week');await self.show(key,r,'week','week')
                                 if local.minute%10==0:
                                     r=await self.report('today');await self.alerts(r,now)
                             self.status={**self.status,'state':'running','checked_at':datetime.now(UTC).isoformat(),'last_error':None,
