@@ -93,4 +93,4 @@ def read(event,execute):
         return response(200,{'pvz_request_id':rid,'count':count,'items':items,'source':response_source,'transport':'yandex-ru','cache_ttl_seconds':TTL},origin)
     except Exception as exc:
         print(json.dumps({'event':'pvz_ru_cache_error','pvz_request_id':rid,'error_code':type(exc).__name__,'detail':str(exc)[:200],'total_ms':round((time.perf_counter()-start)*1000,2)},ensure_ascii=False),flush=True)
-        return response(503,{'pvz_request_id':rid,'error_code':'REAL_CACHE_UNAVAILABLE'},origin)
+        return response(503,{'pvz_request_id':rid,'error_code':'REAL_CACHE_UNAVAILABLE','diagnostic_code':type(exc).__name__,'timeout_source':'ydb_session_or_query'},origin)
