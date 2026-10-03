@@ -239,7 +239,7 @@ def money(rows, ad_spend, dispositions):
     if refund_total is not None:revenue-=Decimal(str(refund_total))
     tax=max(Decimal(0),revenue)*Decimal('.06')
     writeoff=stats['RETURNED_DAMAGED']['units']*cogs
-    rf=total([r.get('yookassa') for r in received]);ro=total([r.get('ozon') for r in received])
+    rf=total(fees);ro=total(outbound)
     rr=total(returned);extras=total(extra)
     before=revenue-cogs_received-tax-writeoff-Decimal(str(ad_spend))-Decimal(str(rf or 0))-Decimal(str(ro or 0))-Decimal(str(rr or 0))-Decimal(str(extras or 0))
     final=float(before) if all(v is not None for v in (rf,ro,rr,extras,total(outbound),refund_total)) else None
@@ -503,10 +503,10 @@ class ProfitFunnel:
             lines += [f"Метрика: sessions {fmt(totals[0] if totals else None)}, avg duration {fmt(totals[1] if len(totals)>1 else None)} сек."]
         if command in ('today','yesterday','week','funnel'):
             lines+=['ВОРОНКА (с новой instrumentation; исторические пробелы UNKNOWN)',f"Измеренные сессии {f['sessions']} — {f['quality']}"]
-            lines+=[' → '.join(f"{name}: {f['counts'][name]}" for name in STAGES)]
+            lines+=[' → '.join(f"{name}: {f['counts'][name] if f['sessions'] else 'UNKNOWN'}" for name in STAGES)]
             biggest=f['biggest_drop'];lines+=[f"🎯 Главная потеря: {biggest['from']} → {biggest['to']}, {biggest['lost']} / {biggest['drop_percent']}%" if biggest else '🎯 Главная потеря: LOW SAMPLE']
             lines += [f"Duration median {fmt(f['duration']['median'])}, avg {fmt(f['duration']['mean'])} сек.; buckets {f['duration_buckets']}"]
-            if command=='funnel':lines += ['Переходы: '+json.dumps(f['drops'],ensure_ascii=False),'Time to action (сек): '+json.dumps(f['time_to_action'],ensure_ascii=False),'Scroll: '+str(f['scroll'])]
+            if command in ('funnel','today','yesterday','week'):lines += ['Переходы: '+json.dumps(f['drops'],ensure_ascii=False),'Time to action (сек): '+json.dumps(f['time_to_action'],ensure_ascii=False),'Scroll: '+str(f['scroll'])]
         if command in ('today','yesterday','week','devices','browsers'):
             lines+=['УСТРОЙСТВА / БРАУЗЕРЫ (Метрика)']
             for row in r['metrika'].get('devices',{}).get('rows',[])[:10]:
@@ -522,11 +522,14 @@ class ProfitFunnel:
                       f"CAC cohort:{e['cac']}; ROAS paid:{fmt(e['roas_paid'])}; ROMI:{fmt(e['romi'])}",
                       'Когортные CAC/ROAS не доказывают атрибуцию рекламе.',
                       f"Остаток ESTIMATED:{r['stock']['estimated_units']} шт / {r['stock']['valuation_rub']} ₽"]
-        if command=='speed':lines+=['LCP/INP/CLS/TTFB: реальные RUM; p75 только n≥20',json.dumps(f['speed'],ensure_ascii=False)]
-        if command=='errors':lines += [json.dumps({'client':f['errors'],'server':r['technical']},ensure_ascii=False)]
+        if command in ('speed','today','yesterday','week'):lines+=['LCP/INP/CLS/TTFB: реальные RUM; p75 только n≥20',json.dumps(f['speed'],ensure_ascii=False)]
+        if command in ('errors','today','yesterday','week'):lines += [json.dumps({'client':f['errors'],'server':r['technical']},ensure_ascii=False)]
+        if command=='status':lines += ['Worker: '+json.dumps(self.status,ensure_ascii=False)]
         if command in ('today','yesterday','week','status'):
             lines += [f"🤖 Controller:{r['controller_actions']}",f"Техника: shipment failures {r['technical']['shipment_failures']}; клиентские ошибки {sum(f['errors'].values())}",
                       f"Baseline:{r['comparison']['quality']}, дней {r['comparison']['days']}; lost revenue estimate:{fmt(r['estimated_lost_revenue'])}"]
+        if command in ('today','yesterday','week','devices','browsers','funnel'):
+            lines += ['Channel/device: '+json.dumps(f['channel_device'],ensure_ascii=False),'New/returning: '+json.dumps(f['visitor_split'],ensure_ascii=False),'Early exits: '+json.dumps(f['early_exit'],ensure_ascii=False),'LCP conversion: '+json.dumps(f['performance_conversion'],ensure_ascii=False)]
         return '\n'.join(lines)
 
     def owner_allowed(self,update):
