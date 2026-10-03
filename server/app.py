@@ -641,7 +641,7 @@ async def analytics_audit(x_internal_key: str | None = Header(default=None)):
     async with db.acquire() as c:
         await _funnel_worker.schema(c)
         event_counts=await c.fetch('SELECT name,origin,count(*) AS count FROM profit_funnel_events GROUP BY name,origin')
-        messages=await c.fetch('SELECT key,state,error_code FROM profit_funnel_outbox ORDER BY created_at DESC LIMIT 30')
+        messages=await c.fetch('SELECT key,state,error_code,telegram_message_id FROM profit_funnel_outbox ORDER BY created_at DESC LIMIT 30')
         tables=await c.fetch("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('commerce_pending_orders','profit_controller_costs','profit_funnel_events')")
     return {'worker':_funnel_worker.status,'events':[dict(r) for r in event_counts],
             'outbox':[dict(r) for r in messages],'source_columns':[dict(r) for r in tables],

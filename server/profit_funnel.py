@@ -38,8 +38,7 @@ def window(period, now=None):
     if period == 'today':
         start, end = today, today + timedelta(days=1)
     elif period == 'week':
-        end = today - timedelta(days=today.weekday())
-        start = end - timedelta(days=7)
+        end, start = today, today - timedelta(days=7)
     elif period == '7d':
         end, start = today, today - timedelta(days=7)
     else:
@@ -362,6 +361,14 @@ class ProfitFunnel:
                     'order:'+str(r['order_id'])+':'+name,sid if initialized else None,name,
                     datetime.now(UTC) if initialized else r['updated_at'],json.dumps(payload),r['order_id'],r['payment_id'],r['shipment_id'])
         await self.put(c,'lifecycle_initialized',{'ok':True})
+        inspections=await c.fetch('SELECT order_id,condition,not_picked_up,confirmed_at FROM profit_funnel_return_dispositions WHERE confirmed_at IS NOT NULL')
+        for d in inspections:
+            names=['NOT_PICKED_UP'] if d['not_picked_up'] else []
+            if d['condition']:names.append('RETURNED_'+d['condition'].upper())
+            for name in names:
+                await c.execute('''INSERT INTO profit_funnel_events(event_id,name,occurred_at,payload,origin,order_id)
+                    VALUES($1,$2,$3,'{"timestamp_basis":"owner_physical_inspection"}','verified_inspection',$4)
+                    ON CONFLICT DO NOTHING''','order:'+str(d['order_id'])+':'+name,name,d['confirmed_at'],d['order_id'])
         returns=await c.fetch("SELECT DISTINCT order_id FROM profit_controller_returns WHERE status='received'")
         for row in returns:
             await c.execute('''INSERT INTO profit_funnel_events(event_id,name,occurred_at,payload,origin,order_id)
@@ -517,7 +524,10 @@ class ProfitFunnel:
             lines+=[' → '.join(f"{name}: {f['counts'][name] if f['sessions'] else 'UNKNOWN'}" for name in STAGES)]
             biggest=f['biggest_drop'];lines+=[f"🎯 Главная потеря: {biggest['from']} → {biggest['to']}, {biggest['lost']} / {biggest['drop_percent']}%" if biggest else '🎯 Главная потеря: LOW SAMPLE']
             lines += [f"Duration median {fmt(f['duration']['median'])}, avg {fmt(f['duration']['mean'])} сек.; buckets {f['duration_buckets']}"]
-            if command in ('funnel','today','yesterday','week'):lines += ['Переходы: '+json.dumps(f['drops'],ensure_ascii=False),'Time to action (сек): '+json.dumps(f['time_to_action'],ensure_ascii=False),'Scroll: '+str(f['scroll'])]
+            if command in ('funnel','today','yesterday','week'):
+                lines += [f'{x["from"]} → {x["to"]}: {x["end"]}/{x["start"]}, CR {fmt(x["conversion_percent"])}%, drop {fmt(x["drop_percent"])}% ({x["quality"]})' for x in f['drops'] if x['start']]
+                lines += [f'Time {k}: median {fmt(v["median"])} s, mean {fmt(v["mean"])} s, n={v["n"]}' for k,v in f['time_to_action'].items() if v['n']]
+                lines += ['Scroll 25/50/75/90: '+('/'.join(str(f['scroll'][str(n)]) for n in (25,50,75,90)) if f['sessions'] else 'UNKNOWN')]
         if command in ('today','yesterday','week','devices','browsers'):
             lines+=['УСТРОЙСТВА / БРАУЗЕРЫ (Метрика)']
             for row in r['metrika'].get('devices',{}).get('rows',[])[:10]:
@@ -534,14 +544,20 @@ class ProfitFunnel:
                       f"CAC cohort:{e['cac']}; ROAS paid:{fmt(e['roas_paid'])}; ROMI:{fmt(e['romi'])}",
                       'Когортные CAC/ROAS не доказывают атрибуцию рекламе.',
                       f"Остаток ESTIMATED:{r['stock']['estimated_units']} шт / {r['stock']['valuation_rub']} ₽"]
-        if command in ('speed','today','yesterday','week'):lines+=['LCP/INP/CLS/TTFB: реальные RUM; p75 только n≥20',json.dumps(f['speed'],ensure_ascii=False)]
+        if command in ('speed','today','yesterday','week'):
+            lines+=['LCP/INP/CLS/TTFB RUM; p75 n≥20']
+            for name,devices in f['speed'].items():
+                lines += [name+': '+ '; '.join(f'{k} p75={fmt(v["p75"])}, median={fmt(v["median"])}, n={v["n"]}' for k,v in devices.items() if v['n']) if any(v['n'] for v in devices.values()) else name+': UNKNOWN']
         if command in ('errors','today','yesterday','week'):lines += [json.dumps({'client':f['errors'],'server':r['technical']},ensure_ascii=False)]
         if command=='status':lines += ['Worker: '+json.dumps(self.status,ensure_ascii=False)]
         if command in ('today','yesterday','week','status'):
             lines += [f"🤖 Controller:{r['controller_actions']}",f"Техника: shipment failures {r['technical']['shipment_failures']}; клиентские ошибки {sum(f['errors'].values())}",
                       f"Baseline:{r['comparison']['quality']}, дней {r['comparison']['days']}; lost revenue estimate:{fmt(r['estimated_lost_revenue'])}"]
         if command in ('today','yesterday','week','devices','browsers','funnel'):
-            lines += ['Channel/device: '+json.dumps(f['channel_device'],ensure_ascii=False),'New/returning: '+json.dumps(f['visitor_split'],ensure_ascii=False),'Early exits: '+json.dumps(f['early_exit'],ensure_ascii=False),'LCP conversion: '+json.dumps(f['performance_conversion'],ensure_ascii=False)]
+            lines += [f'Channel/device {k}: {v["sessions"]} sessions, {v["paid"]} PAID, CR {fmt(v["paid_cr"])}% ({v["quality"]})' for k,v in f['channel_device'].items()]
+            lines += [f'{k}: {v["sessions"]} sessions, {v["paid"]} PAID; median duration {fmt(v["duration"]["median"])} s' for k,v in f['visitor_split'].items()]
+            lines += ['Early exits: '+'; '.join(f'{k}: {fmt(v["percent"])}%' for k,v in f['early_exit'].items())]
+            lines += [f'LCP {k}: {v["sessions"]} sessions, Buy {v["buy"]}, checkout {v["checkout"]}, PAID {v["paid"]} ({v["quality"]})' for k,v in f['performance_conversion'].items()]
         return '\n'.join(lines)
 
     def owner_allowed(self,update):
