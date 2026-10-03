@@ -440,12 +440,7 @@ class ProfitFunnel:
             stock=await self.controller.stock(c,now)
             # Physical inspection alone may mark a returned item resellable/damaged.
             stock['confirmed_resellable_return_units']=sum(r['quantity'] for r in rows if dispositions.get(r['order_id'],{}).get('condition')=='resellable')
-            anchor=await self.controller.state(c,'stock_anchor')
-            additions=await c.fetchval('''SELECT coalesce(sum(p.quantity),0) FROM profit_funnel_return_dispositions d
-                JOIN commerce_pending_orders p USING(order_id) WHERE d.condition='resellable'
-                AND d.confirmed_at IS NOT NULL AND p.created_at >= $1''',datetime.fromisoformat(anchor['as_of']))
-            stock['estimated_units']+=int(additions);stock['valuation_rub']=stock['estimated_units']*230
-            stock['basis']='owner estimate minus new PAID plus physically confirmed resellable returns; not native WMS'
+            # Native stock already includes its real stock events; never deduct PAID or add returns twice.
             actions=[dict(x) for x in await c.fetch('SELECT action,state,count(*) AS count FROM profit_controller_actions WHERE created_at >= $1 AND created_at < $2 GROUP BY action,state',start,end)]
             failures=[dict(x) for x in await c.fetch("SELECT kind,state,count(*) AS count FROM commerce_service_messages WHERE order_id>0 AND updated_at >= $1 AND updated_at < $2 GROUP BY kind,state",start,end)]
             shipment_failures=await c.fetchval('SELECT count(*) FROM commerce_pending_orders WHERE payment_status=\'succeeded\' AND post_purchase_failures>=3')
@@ -506,7 +501,7 @@ class ProfitFunnel:
         f=current['instrumented_funnel'];n=f['counts'][first]
         if denominators>=100 and n>=20:
             missed=max(0,n*successes/denominators-f['counts'][last])
-            current['estimated_lost_revenue']={'rub':round(missed*800,2),'basis':'Оценка, не фактический убыток','baseline_sessions':denominators}
+            current['estimated_lost_revenue']={'rub':round(missed*1200,2),'basis':'Оценка, не фактический убыток','baseline_sessions':denominators}
         return result
 
     def text(self,r,command='today'):

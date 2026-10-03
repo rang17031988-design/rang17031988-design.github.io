@@ -8,7 +8,8 @@ class ValidationTests(unittest.TestCase):
     def setUp(self):
         self.order={'payment_id':'example','order_number':1002,'amount':'800.00'}
         self.payment={'id':'example','recipient':{'account_id':'1399141'},'test':False,
-            'amount':{'value':'800.00','currency':'RUB'},'description':'Заказ №1002',
+            'amount':{'value':'800.00','currency':'RUB'},'description':'Заказ №1002 на сайте посуда163.рф',
+            'metadata':{'cms_name':'insales_native'},
             'status':'succeeded','paid':True}
     def test_valid(self):
         self.assertIsNone(validate_payment(self.payment,self.order,'1399141'))

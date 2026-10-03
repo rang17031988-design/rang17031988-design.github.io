@@ -1,6 +1,7 @@
 import json
 import re
 from decimal import Decimal
+from product_catalog import frozen_unit_price
 
 def normalize_street(value):
     value = ' '.join(str(value or '').split()).casefold()
@@ -24,7 +25,7 @@ def verify_native_proof(order, pending, order_key):
     if Decimal(str(order.get('full_total_price', 'NaN'))) != Decimal(str(pending['amount'])) or Decimal(str(order.get('delivery_price', 'NaN'))) != 0:
         raise ValueError('Native amount mismatch')
     items = order.get('order_lines', [])
-    if len(items) != 1 or items[0].get('product_id') != 1825508753 or items[0].get('variant_id') != 2184195121 or items[0].get('quantity') != pending['quantity'] or Decimal(str(items[0].get('sale_price'))) != 800:
+    if len(items) != 1 or items[0].get('product_id') != 1825508753 or items[0].get('variant_id') != 2184195121 or items[0].get('quantity') != pending['quantity'] or Decimal(str(items[0].get('sale_price'))) != frozen_unit_price(pending,snapshot):
         raise ValueError('Native product/quantity mismatch')
     if order.get('payment_gateway', {}).get('id') != 14315601 or order.get('delivery_variant', {}).get('id') != 32292089:
         raise ValueError('Native payment/delivery mismatch')

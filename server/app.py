@@ -13,6 +13,7 @@ from paid_metrika import paid_conversion, conversion_csv
 from profit_controller import Controller
 from profit_funnel import ProfitFunnel
 import pvz_diagnostics
+from product_catalog import read_catalog, PRODUCT_NAME, frozen_unit_price
 
 OZON_TOKEN_URL = "https://xapi.ozon.ru/oauth/token"
 OZON_API_BASE = "https://api-delivery.ozon.ru/"
@@ -23,7 +24,7 @@ INTERNAL_KEY = os.getenv("OZON_INTERNAL_KEY", "")
 PII_FUNCTION_URL = os.getenv("PII_FUNCTION_URL", "")
 PII_INTERNAL_KEY = os.getenv("PII_INTERNAL_KEY", "")
 ENABLE_REAL_OZON_CREATE = os.getenv("ENABLE_REAL_OZON_CREATE", "false").strip().lower() in ("1", "true", "yes", "on")
-PRODUCT_PRICE = os.getenv("PRODUCT_PRICE_RUB", "800")
+PRODUCT_PRICE = os.getenv("PRODUCT_PRICE_RUB", "1200")
 PRODUCT_WEIGHT_G = int(os.getenv("PRODUCT_WEIGHT_G", "200"))
 PRODUCT_LENGTH_MM = int(os.getenv("PRODUCT_LENGTH_MM", "210"))
 PRODUCT_WIDTH_MM = int(os.getenv("PRODUCT_WIDTH_MM", "50"))
@@ -1047,7 +1048,7 @@ class NativePaymentBinding(BaseModel):
     order_id: int = Field(gt=0)
     order_number: int = Field(gt=0)
     payment_id: uuid.UUID
-    quantity: int = Field(ge=1, le=100)
+    quantity: int = Field(ge=1, le=10000)
     recipient_name: str = Field(min_length=1, max_length=250)
     phone: str = Field(min_length=5, max_length=40)
     email: str = Field(max_length=250)
@@ -1120,7 +1121,7 @@ class AttributionIn(BaseModel):
 class PendingOrderIn(BaseModel):
     session_id: uuid.UUID
     attribution: AttributionIn | None = None
-    quantity: int = Field(ge=1, le=100)
+    quantity: int = Field(ge=1, le=10000)
     product_id: int
     variant_id: int
     recipient_name: str = Field(min_length=2, max_length=250)
@@ -1137,6 +1138,11 @@ class NativeOrderLinkIn(BaseModel):
 async def create_pending_order(body: PendingOrderIn):
     if body.product_id != 1825508753 or body.variant_id != 2184195121 or '@' not in body.email:
         raise HTTPException(422, 'Invalid product or recipient')
+    async with httpx.AsyncClient() as client:
+        try:catalog=await read_catalog(client)
+        except Exception:raise HTTPException(503,'Native product price/stock temporarily unavailable')
+    if not catalog['available'] or body.quantity>catalog['quantity']:raise HTTPException(409,'Requested quantity unavailable')
+    unit_price=catalog['unit_price']
     await _payment_schema()
     async with db.acquire() as c:
         point = await c.fetchrow('SELECT * FROM ozon_delivery_points_cache WHERE delivery_point_id=$1 AND is_active=true', body.pickup_point_id)
@@ -1150,13 +1156,13 @@ async def create_pending_order(body: PendingOrderIn):
         snapshot = body.model_dump(mode='json')
         snapshot.update(internal_order_token=token, pickup_title=point['point_name'],
                         pickup_address=point['point_address'], delivery_point_id=body.pickup_point_id,
-                        shipment_method_ids=methods, product='Съёмная ручка для сковороды',
-                        unit_price=800, delivery_price=0)
+                        shipment_method_ids=methods, product=PRODUCT_NAME,
+                        unit_price=unit_price, delivery_price=0)
         await c.execute('''INSERT INTO commerce_pending_orders
             (internal_order_token,session_id,quantity,amount,snapshot,shipment_idempotency_key)
             VALUES($1,$2,$3,$4,$5::jsonb,$6)''', token, str(body.session_id), body.quantity,
-            Decimal(body.quantity)*800, json.dumps(snapshot), str(uuid.uuid4()))
-    return {'ok': True, 'internal_order_token': token, 'amount': body.quantity*800,
+            Decimal(body.quantity)*unit_price, json.dumps(snapshot), str(uuid.uuid4()))
+    return {'ok': True, 'internal_order_token': token, 'amount': body.quantity*unit_price,
             'pickup_address': snapshot['pickup_address']}
 
 @app.post('/api/commerce/link-order', include_in_schema=False)
@@ -1394,6 +1400,7 @@ async def _create_paid_ozon_shipment(payment_id):
     postings = []
     for i in range(row['quantity']):
         parcel = _parcel(i+1, int(snapshot['shipment_method_ids'][0]))
+        parcel['declared_value']={'amount':format(frozen_unit_price(row,snapshot),'.2f'),'currency_code':'RUB'}
         parcel.update(posting_external_id=external_id+'-'+str(i+1), description='Съёмная ручка для сковороды, 1 шт.')
         postings.append(parcel)
     payload = {'order_external_id': external_id,
@@ -1642,7 +1649,11 @@ async def bind_native_payment(body: NativePaymentBinding, x_internal_key: str | 
     payment_id = str(body.payment_id)
     payment = await _yookassa_read('payments/' + payment_id, x_internal_key)
     snapshot = body.model_dump(mode='json')
-    expected = {'payment_id': payment_id, 'order_number': body.order_number, 'amount': Decimal(body.quantity)*800}
+    await _payment_schema()
+    async with db.acquire() as c:
+        pending=await c.fetchrow('SELECT * FROM commerce_pending_orders WHERE order_id=$1 AND order_number=$2',body.order_id,body.order_number)
+    if not pending or pending['quantity']!=body.quantity:raise HTTPException(409,'Verified native order binding required')
+    expected = {'payment_id': payment_id, 'order_number': body.order_number, 'amount': pending['amount']}
     error = validate_payment(payment, expected, os.getenv('YOOKASSA_SHOP_ID', ''))
     if error and error != 'not_paid':
         raise HTTPException(409, error)

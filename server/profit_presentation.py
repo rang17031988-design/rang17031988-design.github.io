@@ -265,7 +265,7 @@ def render(r,command,worker=None):
         lines+=['Заказы относятся к периоду их создания.']
     elif command=='returns':lines=returns(r)
     elif command=='stock':
-        s=r['stock'];lines=['🏪 СКЛАД',f'📦 Доступно, оценка: {number(s["estimated_units"])} шт.',f'💰 Себестоимость остатка: {rub(s["valuation_rub"])}','🟡 Остаток расчётный; сверяйте с фактическим складом.','📦 Себестоимость: 230 ₽/шт.']
+        s=r['stock'];lines=['🏪 СКЛАД',f'📦 Доступно: {number(s["estimated_units"])} шт.',f'💰 Себестоимость остатка: {rub(s["valuation_rub"])}','📦 Источник остатка: штатный склад InSales.','📦 Себестоимость: 230 ₽/шт.']
     elif command=='errors':lines=errors(r)
     elif command=='status':lines=system(r,worker)
     else:lines=attention(r)

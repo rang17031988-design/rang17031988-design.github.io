@@ -1,3 +1,4 @@
+from product_catalog import read_catalog
 """Own-campaign controller. Provider approval and live-write switch are separate gates.
 
 API contracts: official Direct Reports, KeywordBids and Campaigns services.
@@ -275,7 +276,7 @@ class Controller:
         checks = {}
         try:
             landing = await self.http.get('https://xn--163-5cdt3dgrs.xn--p1ai/', follow_redirects=True)
-            checks['landing'] = landing.status_code == 200 and '800' in landing.text and 'Купить' in landing.text
+            checks['landing'] = landing.status_code == 200 and ('data-offer-unit-price' in landing.text or '800' in landing.text) and 'Купить' in landing.text
         except Exception:
             checks['landing'] = False
         try:
@@ -420,7 +421,12 @@ class Controller:
         metric['backend_checkout_records'] = await c.fetchval('''SELECT count(*) FROM commerce_pending_orders
             WHERE created_at >= $1 AND created_at < $2''',start,now)
         metric['backend_checkout_basis'] = 'validated checkout preparation records; not Metrika goal or unique visits'
-        bid_result = await self.api('keywordbids','get',{'SelectionCriteria':{'CampaignIds':[CAMPAIGN]},
+        strategy_result=await self.api('campaigns','get',{'SelectionCriteria':{'Ids':[CAMPAIGN]},'FieldNames':['Id'],'UnifiedCampaignFieldNames':['BiddingStrategy']})
+        campaigns=strategy_result.get('Campaigns',[])
+        if len(campaigns)!=1 or campaigns[0]['Id']!=CAMPAIGN:raise DirectError('strategy_campaign_mismatch')
+        search_strategy=campaigns[0].get('UnifiedCampaign',{}).get('BiddingStrategy',{}).get('Search',{}).get('BiddingStrategyType')
+        automatic_strategy=search_strategy!='MANUAL_CPC'
+        bid_result = {'KeywordBids':[]} if automatic_strategy else await self.api('keywordbids','get',{'SelectionCriteria':{'CampaignIds':[CAMPAIGN]},
             'FieldNames':['KeywordId','AdGroupId','CampaignId','ServingStatus'],
             'SearchFieldNames':['Bid','AuctionBids']})
         if bid_result.get('LimitedBy'): raise DirectError('incomplete_bids')
@@ -504,21 +510,16 @@ class Controller:
             await self.notify(c,'daily-shipment-'+local.date().isoformat(),'\n'.join(lines))
 
     async def stock(self,c,now):
-        # Owner estimate is explicitly labeled; never overwrite native stock.
-        anchor = await self.state(c,'stock_anchor')
-        if not anchor:
-            anchor = {'estimated_units':700,'as_of':now.isoformat()}
-            await self.put(c,'stock_anchor',anchor)
-        since = datetime.fromisoformat(anchor['as_of'])
-        units = await c.fetchval('''SELECT coalesce(sum(quantity),0) FROM commerce_pending_orders
-            WHERE payment_status='succeeded' AND created_at >= $1''',since)
-        remaining = max(0,anchor['estimated_units']-int(units))
-        days = (now-since).total_seconds()/86400
+        catalog=await read_catalog(self.http)
+        remaining=catalog['quantity']
+        sales=await c.fetchrow("SELECT coalesce(sum(quantity) FILTER (WHERE payment_status='succeeded'),0) AS units,min(created_at) AS first_seen FROM commerce_pending_orders WHERE created_at>=$1",now-timedelta(days=30))
+        elapsed=max(1,(now-sales['first_seen']).total_seconds()/86400) if sales and sales['first_seen'] else None
+        velocity=float(sales['units'])/elapsed if elapsed and sales['units'] else None
+        await self.put(c,'stock_native',{'units':remaining,'as_of':now.isoformat(),'source':catalog['source']})
         return {'estimated_units':remaining,'valuation_rub':remaining*COGS_UNIT_RUB,
-                'cogs_unit_rub':COGS_UNIT_RUB,'as_of':now.isoformat(),'basis':'owner estimate 700 minus new PAID; returns are not restocked automatically',
-                'coverage_at_target_days':remaining/50,
-                'coverage_at_observed_velocity_days':remaining/(units/days) if days >= 1 and units else None,
-                'authoritative':False}
+                'cogs_unit_rub':COGS_UNIT_RUB,'as_of':now.isoformat(),'basis':'InSales native available stock; no additional paid subtraction',
+                'coverage_at_target_days':remaining/50,'coverage_at_observed_velocity_days':remaining/velocity if velocity else None,
+                'authoritative':True}
 
     async def weekly(self, c, now, preview=False):
         local = now.astimezone(MOSCOW)
