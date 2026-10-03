@@ -573,7 +573,8 @@ class Controller:
                             service_bad = await self.service_guard(c,campaigns[0],now)
                             paused = paused or service_bad
                             await self.hourly(c,now,paused)
-                            await self.weekly(c,now)
+                            if not (os.getenv('PROFIT_FUNNEL_ENABLED','').lower()=='true' and os.getenv('PROFIT_FUNNEL_BOT_TOKEN')):
+                                await self.weekly(c,now)
                             await self.daily_shipments(c,now)
                             self.status={'state':'running','checked_at':now.isoformat(),'live_writes':self.writes,'campaign':CAMPAIGN,
                                          'min_bid_rub':float(MIN_BID),'max_bid_rub':float(MAX_BID),

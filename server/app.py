@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, Response
 from customer_messages import STATUS_LABELS, email_ready, send_customer_email, production_email_allowed, send_resend_test, EmailDeliveryRejected
 from paid_metrika import paid_conversion, conversion_csv
 from profit_controller import Controller
+from profit_funnel import ProfitFunnel
 import pvz_diagnostics
 
 OZON_TOKEN_URL = "https://xapi.ozon.ru/oauth/token"
@@ -58,6 +59,8 @@ _sync_task = None
 _payment_task = None
 _profit_task = None
 _profit_controller = None
+_funnel_worker = None
+_funnel_task = None
 _pvz_export_task = None
 
 def _safe_origin(url: str):
@@ -440,7 +443,7 @@ class DeliveryStatusIn(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    global db, _sync_task, _payment_task, _profit_task, _profit_controller
+    global db, _sync_task, _payment_task, _profit_task, _profit_controller, _funnel_worker, _funnel_task
     if DATABASE_URL:
         db = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
         async with db.acquire() as c:
@@ -522,6 +525,18 @@ async def startup():
             _profit_controller = Controller(db, _http, _ozon_post)
             _profit_task = asyncio.create_task(_profit_controller.loop())
 
+        if os.getenv('PROFIT_FUNNEL_ENABLED', '').lower() == 'true':
+            # Reporting failures remain isolated from purchase/payment workers.
+            try:
+                await _payment_schema()
+                reporting_controller = _profit_controller or Controller(db, _http, _ozon_post)
+                async with db.acquire() as c:
+                    await reporting_controller.schema(c)
+                _funnel_worker = ProfitFunnel(db, reporting_controller, _pii_call)
+                _funnel_task = asyncio.create_task(_funnel_worker.loop())
+            except Exception as exc:
+                print('PROFIT_FUNNEL_START_ERROR='+type(exc).__name__)
+
     if PII_FUNCTION_URL and PII_INTERNAL_KEY:
         try:
             result = await _pii_call("health")
@@ -534,8 +549,8 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _sync_task, _payment_task, _profit_task
-    for task in (_sync_task, _payment_task, _profit_task):
+    global _sync_task, _payment_task, _profit_task, _funnel_task
+    for task in (_sync_task, _payment_task, _profit_task, _funnel_task):
         if not task:
             continue
         task.cancel()
@@ -544,6 +559,8 @@ async def shutdown():
         except asyncio.CancelledError:
             pass
     await _http.aclose()
+    if _funnel_worker:
+        await _funnel_worker.http.aclose()
     if db:
         await db.close()
 
@@ -566,6 +583,45 @@ async def controller_audit(preview: bool = False, x_internal_key: str | None = H
     return {'runtime': _profit_controller.status, 'snapshots': [dict(r) for r in snapshots],
             'states': [dict(r) for r in states], 'actions': [dict(r) for r in counts],
             'weekly_preview': report}
+
+@app.post('/api/analytics/events', include_in_schema=False)
+async def analytics_events(request: Request):
+    if not _funnel_worker:
+        return JSONResponse({'accepted':0,'available':False},status_code=202)
+    if request.headers.get('origin') not in ('https://xn--163-5cdt3dgrs.xn--p1ai','https://myshop-ddv761.myinsales.ru'):
+        raise HTTPException(403,'Forbidden')
+    raw=await request.body()
+    if len(raw)>16000:raise HTTPException(413,'Too large')
+    try:
+        result=await asyncio.wait_for(_funnel_worker.ingest(json.loads(raw),request.headers.get('user-agent','')),timeout=2)
+        return result
+    except (ValueError,KeyError,TypeError):raise HTTPException(400,'Invalid analytics batch')
+    except Exception:
+        # Analytics outage never changes the checkout result or logs contact data.
+        return JSONResponse({'accepted':0,'available':False},status_code=202)
+
+@app.get('/api/internal/analytics/report', include_in_schema=False)
+async def analytics_report(period: str = 'yesterday', command: str = 'yesterday', x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY,x_internal_key):raise HTTPException(403,'Forbidden')
+    if not _funnel_worker:raise HTTPException(503,'Reporting disabled')
+    if period not in ('today','yesterday','week','7d'):raise HTTPException(400,'Invalid period')
+    report=await _funnel_worker.report(period)
+    return {'report':report,'message':_funnel_worker.text(report,command),'worker':_funnel_worker.status}
+
+@app.get('/api/internal/analytics/audit', include_in_schema=False)
+async def analytics_audit(x_internal_key: str | None = Header(default=None)):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY,x_internal_key):raise HTTPException(403,'Forbidden')
+    if not _funnel_worker:return {'state':'disabled'}
+    async with db.acquire() as c:
+        await _funnel_worker.schema(c)
+        event_counts=await c.fetch('SELECT name,origin,count(*) AS count FROM profit_funnel_events GROUP BY name,origin')
+        messages=await c.fetch('SELECT key,state,error_code FROM profit_funnel_outbox ORDER BY created_at DESC LIMIT 30')
+        tables=await c.fetch("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('commerce_pending_orders','profit_controller_costs','profit_funnel_events')")
+    return {'worker':_funnel_worker.status,'events':[dict(r) for r in event_counts],
+            'outbox':[dict(r) for r in messages],'source_columns':[dict(r) for r in tables],
+            'bot_configured':bool(os.getenv('PROFIT_FUNNEL_BOT_TOKEN')),'owner_only':True}
 
 @app.get("/health")
 async def health():

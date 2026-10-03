@@ -249,6 +249,9 @@ def handler(event, context):
     if event.get('httpMethod')=='POST' and (event.get('queryStringParameters') or {}).get('action')=='pvz_trace':
         import pvz_transport
         return pvz_transport.client_trace(event)
+    if event.get('httpMethod')=='POST' and (event.get('queryStringParameters') or {}).get('action')=='analytics':
+        import analytics_inbox
+        return analytics_inbox.ingest(event,_execute)
     try:
         raw = event.get("body") or "{}"
         if event.get("isBase64Encoded"):
@@ -267,7 +270,12 @@ def handler(event, context):
             _ensure_schema()
             _schema_ready = True
         action = str(data.get("action") or "")
-        if action == "store_checkout":
+        if action in ('analytics_prepare','analytics_read','analytics_ack'):
+            import analytics_inbox
+            if action=='analytics_prepare':analytics_inbox.ensure(_execute);result={'ok':True}
+            elif action=='analytics_read':result=analytics_inbox.read(_execute)
+            else:result=analytics_inbox.ack(data,_execute)
+        elif action == "store_checkout":
             result = _store(data, context)
         elif action == "get":
             row = _row(str(data.get("source_token") or "")[:80])
