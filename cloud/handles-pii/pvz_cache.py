@@ -1,6 +1,8 @@
 """TTL cache of public Ozon catalogue, pushed by authenticated existing Railway."""
 import datetime,json,math,re,time,uuid
 import ydb
+from collections import OrderedDict
+RESPONSES=OrderedDict()
 from pvz_transport import response
 
 SCHEMA='''CREATE TABLE IF NOT EXISTS public_ozon_pvz_cache (
@@ -71,11 +73,24 @@ def read(event,execute):
             params.update({'$keys':keys,'$south':south,'$west':west,'$north':north,'$east':east});view+=' VIEW by_geo';where+=['geo_key IN $keys','latitude BETWEEN $south AND $north','longitude BETWEEN $west AND $east' if west<=east else '(longitude>=$west OR longitude<=$east)']
         else:raise ValueError('INVALID_KIND')
         condition=' AND '.join(where);prefix='\n'.join(declarations)
-        result=execute(prefix+f'\nSELECT COUNT(*) AS n FROM {view} WHERE {condition};\nSELECT payload FROM {view} WHERE {condition} LIMIT $limit;',params)
-        normalize_start=datetime.datetime.now(datetime.timezone.utc).isoformat();count=int(result[0].rows[0].n);items=[json.loads(r.payload) for r in result[1].rows];normalize_end=datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cache_key=tuple(sorted((k,str(v)) for k,v in q.items() if k in ('kind','limit','city','query','south','west','north','east')));cached=RESPONSES.get(cache_key);now=time.time();response_source='real_ozon_ydb_cache'
+        if cached and now-cached[0]<300 and cached[1]>now:
+            count,items=cached[2:];response_source='memory_real_ozon_cache';normalize_start=datetime.datetime.now(datetime.timezone.utc).isoformat();normalize_end=normalize_start
+        else:
+            try:result=execute(prefix+f'\nSELECT COUNT(*) AS n FROM {view} WHERE {condition};\nSELECT payload,expires_at FROM {view} WHERE {condition} LIMIT $limit;',params)
+            except Exception:
+                if not cached or now-cached[0]>3600 or cached[1]<=now:raise
+                count,items=cached[2:];response_source='memory_real_ozon_fallback';result=None
+            if result is not None:
+                normalize_start=datetime.datetime.now(datetime.timezone.utc).isoformat();count=int(result[0].rows[0].n);items=[json.loads(r.payload) for r in result[1].rows];normalize_end=datetime.datetime.now(datetime.timezone.utc).isoformat()
+                expiry=min((r.expires_at.timestamp() if hasattr(r.expires_at,'timestamp') else float(r.expires_at)/1000000 for r in result[1].rows),default=now)
+                if items:
+                    RESPONSES[cache_key]=(now,expiry,count,items);RESPONSES.move_to_end(cache_key)
+                    while len(RESPONSES)>128:RESPONSES.popitem(last=False)
+            else:normalize_start=datetime.datetime.now(datetime.timezone.utc).isoformat();normalize_end=normalize_start
         elapsed=round((time.perf_counter()-start)*1000,2)
-        print(json.dumps({'event':'pvz_ru_cache_response','pvz_request_id':rid,'request_received_at':received,'response_sent_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'geocode_start':None,'geocode_end':None,'ozon_start':None,'ozon_end':None,'ozon_http_status':None,'ozon_result_count':len(items),'upstream_skipped':'fresh_real_ozon_cache','normalize_start':normalize_start,'normalize_end':normalize_end,'coordinates':{k:q[k] for k in ('south','west','north','east') if k in q},'client_ua':headers.get('user-agent','')[:300],'city':q.get('city',''),'kind':kind,'count':count,'raw_count':len(items),'normalized_count':len(items),'total_ms':elapsed,'source':'real_ozon_ydb_cache','error_code':None,'timeout_source':None},ensure_ascii=False),flush=True)
-        return response(200,{'pvz_request_id':rid,'count':count,'items':items,'source':'real_ozon_ydb_cache','transport':'yandex-ru','cache_ttl_seconds':TTL},origin)
+        print(json.dumps({'event':'pvz_ru_cache_response','pvz_request_id':rid,'request_received_at':received,'response_sent_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'geocode_start':None,'geocode_end':None,'ozon_start':None,'ozon_end':None,'ozon_http_status':None,'ozon_result_count':len(items),'upstream_skipped':'fresh_real_ozon_cache','normalize_start':normalize_start,'normalize_end':normalize_end,'coordinates':{k:q[k] for k in ('south','west','north','east') if k in q},'client_ua':headers.get('user-agent','')[:300],'city':q.get('city',''),'kind':kind,'count':count,'raw_count':len(items),'normalized_count':len(items),'total_ms':elapsed,'source':response_source,'error_code':None,'timeout_source':None},ensure_ascii=False),flush=True)
+        return response(200,{'pvz_request_id':rid,'count':count,'items':items,'source':response_source,'transport':'yandex-ru','cache_ttl_seconds':TTL},origin)
     except Exception as exc:
         print(json.dumps({'event':'pvz_ru_cache_error','pvz_request_id':rid,'error_code':type(exc).__name__,'detail':str(exc)[:200],'total_ms':round((time.perf_counter()-start)*1000,2)},ensure_ascii=False),flush=True)
         return response(503,{'pvz_request_id':rid,'error_code':'REAL_CACHE_UNAVAILABLE'},origin)

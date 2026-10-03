@@ -245,7 +245,7 @@ def handler(event, context):
     # Public, read-only route; all existing PII actions retain their authentication.
     if event.get('httpMethod')=='GET' and (event.get('queryStringParameters') or {}).get('action')=='pvz':
         import pvz_cache
-        return pvz_cache.read(event,_execute)
+        return pvz_cache.read(event,lambda query,params:pool.execute_with_retries(query,params,retry_settings=ydb.RetrySettings(max_retries=1,max_session_acquire_timeout=2,idempotent=True,slow_backoff_settings=ydb.BackoffSettings(1,.05)),settings=ydb.BaseRequestSettings().with_timeout(2.5)))
     if event.get('httpMethod')=='POST' and (event.get('queryStringParameters') or {}).get('action')=='pvz_trace':
         import pvz_transport
         return pvz_transport.client_trace(event)
