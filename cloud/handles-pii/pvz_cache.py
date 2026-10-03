@@ -44,7 +44,7 @@ def store(data,execute):
     return {'ok':True,'stored':len(values),'ttl_seconds':TTL}
 
 def read(event,execute):
-    start=time.perf_counter();headers={str(k).lower():str(v) for k,v in (event.get('headers') or {}).items()};origin=headers.get('origin','')
+    received=datetime.datetime.now(datetime.timezone.utc).isoformat();start=time.perf_counter();headers={str(k).lower():str(v) for k,v in (event.get('headers') or {}).items()};origin=headers.get('origin','')
     q=event.get('queryStringParameters') or {}
     try:rid=str(uuid.UUID(q.get('pvz_request_id','')))
     except (ValueError,TypeError,AttributeError):rid=str(uuid.uuid4())
@@ -54,10 +54,12 @@ def read(event,execute):
         if kind=='points':
             city=city_key(q.get('city',''));query=q.get('query','').strip().casefold()
             if len(query)<2 or len(query)>100 or len(city)>100: raise ValueError('INVALID_QUERY')
+            region=bool(re.search(r'обл|край|республик|округ',city,re.I))
+            if region:city=''
             if city:
                 declarations.append('DECLARE $city AS Utf8;');params['$city']=city;where.append('city_key=$city')
             if city_key(query)==city:query=city
-            for i,token in enumerate(query.replace(',',' ').split()):
+            for i,token in enumerate(query.replace(',',' ').replace('.',' ').split()):
                 key=f'$query{i}';declarations.append(f'DECLARE {key} AS Utf8;');params[key]=token;where.append(f'String::Contains(CAST(address_norm AS String),CAST({key} AS String))')
         elif kind=='map-points':
             south,west,north,east=[float(q[k]) for k in ('south','west','north','east')]
@@ -70,9 +72,9 @@ def read(event,execute):
         else:raise ValueError('INVALID_KIND')
         condition=' AND '.join(where);prefix='\n'.join(declarations)
         result=execute(prefix+f'\nSELECT COUNT(*) AS n FROM {view} WHERE {condition};\nSELECT payload FROM {view} WHERE {condition} LIMIT $limit;',params)
-        count=int(result[0].rows[0].n);items=[json.loads(r.payload) for r in result[1].rows]
+        normalize_start=datetime.datetime.now(datetime.timezone.utc).isoformat();count=int(result[0].rows[0].n);items=[json.loads(r.payload) for r in result[1].rows];normalize_end=datetime.datetime.now(datetime.timezone.utc).isoformat()
         elapsed=round((time.perf_counter()-start)*1000,2)
-        print(json.dumps({'event':'pvz_ru_cache_response','pvz_request_id':rid,'client_ua':headers.get('user-agent','')[:300],'city':q.get('city',''),'kind':kind,'count':count,'raw_count':len(items),'normalized_count':len(items),'total_ms':elapsed,'source':'real_ozon_ydb_cache','error_code':None,'timeout_source':None},ensure_ascii=False),flush=True)
+        print(json.dumps({'event':'pvz_ru_cache_response','pvz_request_id':rid,'request_received_at':received,'response_sent_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'geocode_start':None,'geocode_end':None,'ozon_start':None,'ozon_end':None,'ozon_http_status':None,'ozon_result_count':len(items),'upstream_skipped':'fresh_real_ozon_cache','normalize_start':normalize_start,'normalize_end':normalize_end,'coordinates':{k:q[k] for k in ('south','west','north','east') if k in q},'client_ua':headers.get('user-agent','')[:300],'city':q.get('city',''),'kind':kind,'count':count,'raw_count':len(items),'normalized_count':len(items),'total_ms':elapsed,'source':'real_ozon_ydb_cache','error_code':None,'timeout_source':None},ensure_ascii=False),flush=True)
         return response(200,{'pvz_request_id':rid,'count':count,'items':items,'source':'real_ozon_ydb_cache','transport':'yandex-ru','cache_ttl_seconds':TTL},origin)
     except Exception as exc:
         print(json.dumps({'event':'pvz_ru_cache_error','pvz_request_id':rid,'error_code':type(exc).__name__,'detail':str(exc)[:200],'total_ms':round((time.perf_counter()-start)*1000,2)},ensure_ascii=False),flush=True)
