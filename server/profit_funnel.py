@@ -474,7 +474,12 @@ class ProfitFunnel:
         async with self.pool.acquire() as c:
             await self.schema(c)
             events=[dict(x) for x in await c.fetch('SELECT * FROM profit_funnel_events WHERE occurred_at >= $1 AND occurred_at < $2 ORDER BY occurred_at',start,end)]
-            sessions=[dict(x) for x in await c.fetch('SELECT * FROM profit_funnel_sessions WHERE started_at >= $1 AND started_at < $2',start,end)]
+            # A session can continue past midnight. Include sessions with real
+            # events inside the requested window, retaining original attribution.
+            sessions=[dict(x) for x in await c.fetch('''SELECT * FROM profit_funnel_sessions s
+                WHERE (started_at >= $1 AND started_at < $2) OR EXISTS (
+                    SELECT 1 FROM profit_funnel_events e WHERE e.session_id=s.session_id
+                    AND e.occurred_at >= $1 AND e.occurred_at < $2)''',start,end)]
             rows=await self.controller.order_cohort(c,start,end)
             dispositions={x['order_id']:dict(x) for x in await c.fetch('SELECT * FROM profit_funnel_return_dispositions')}
             returns=await c.fetch('SELECT order_id,return_type,status FROM profit_controller_returns')
