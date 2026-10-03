@@ -23,7 +23,7 @@ import profit_presentation as presentation
 MSK = ZoneInfo('Europe/Moscow')
 UTC = timezone.utc
 COMMANDS = 'today yesterday week funnel devices browsers speed ads profit orders returns stock errors status'.split()
-CLIENT_EVENTS = set('SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
+CLIENT_EVENTS = set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
 STAGES = 'SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_LOADED PVZ_SELECTED PAYMENT_STARTED PAYMENT_SUCCESS ORDER_RECEIVED'.split()
 ATTR_KEYS = 'yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()
 LOCK = 715029849
@@ -107,6 +107,13 @@ def safe_client(batch, ua, now=None):
         for key in ('elapsed_ms','duration_sec','value'):
             raw = e.get(key)
             if isinstance(raw,(float,int)) and not isinstance(raw,bool) and math.isfinite(raw) and 0 <= raw <= 86400000: p[key] = raw
+        for key in ('video_watch_seconds','video_duration_seconds','video_completion_percent'):
+            raw=e.get(key)
+            limit=100 if key=='video_completion_percent' else 86400
+            if raw is not None:
+                if isinstance(raw,bool) or not isinstance(raw,(float,int)) or not math.isfinite(raw) or not 0<=raw<=limit: raise ValueError('video_metric')
+                p[key]=raw
+        if e.get('video_view_id') is not None: p['video_view_id']=str(uuid.UUID(e['video_view_id']))
         if e.get('metric') in ('LCP','INP','CLS','TTFB'): p['metric'] = e['metric']
         if e.get('error_code') in ('NETWORK','TIMEOUT','HTTP','JS','RENDER','PAYMENT','OZON','EMAIL'): p['error_code'] = e['error_code']
         # Paths are fixed page categories, never checkout keys or URLs.
@@ -196,7 +203,7 @@ def funnel(events, sessions):
     for v in visitor_split.values():
         v.update(paid_cr=ratio(v['paid'],v['sessions']),duration=distribution(v.pop('durations')))
     biggest = max((x for x in drops if x['start']>=20),key=lambda x:x['lost'],default=None)
-    return {'sessions':len(groups),'counts':counts,'drops':drops,'biggest_drop':biggest,
+    return {'video':video_summary(groups),'sessions':len(groups),'counts':counts,'drops':drops,'biggest_drop':biggest,
             'time_to_action':timings,'duration':distribution(durations),'duration_buckets':buckets,
             'early_exit':{f'<{n}s':{'count':sum(x<n for x in durations),'percent':ratio(sum(x<n for x in durations),len(durations))} for n in (3,5,10)},
             'segments':segments,'speed':speed,'errors':errors,
@@ -205,6 +212,42 @@ def funnel(events, sessions):
             'new_returning':{k:sum(g['session']['new_visitor']==v for g in groups.values()) for k,v in [('new',True),('returning',False)]},
             'quality':'LOW SAMPLE' if len(groups)<20 else 'CONFIRMED'}
 
+
+
+def video_summary(groups):
+    """Session cohorts and real playback snapshots; no implied sales causality."""
+    counts={n:0 for n in ('cta_view','open','play','viewers_25','viewers_50','viewers_75','complete')}
+    snapshots=[];orders=[]
+    cohorts={k:{'sessions':0,'buy':0,'checkout':0,'paid':0} for k in ('viewers','non_viewers')}
+    after={'buy':0,'checkout':0,'paid':0}
+    names={'cta_view':'VIDEO_CTA_VIEW','open':'VIDEO_OPEN','play':'VIDEO_PLAY','viewers_25':'VIDEO_25','viewers_50':'VIDEO_50','viewers_75':'VIDEO_75','complete':'VIDEO_COMPLETE'}
+    for sid,g in groups.items():
+        es=g['all'];seen={e['name'] for e in es}
+        for k,n in names.items():counts[k]+=n in seen
+        played=[e['occurred_at'] for e in es if e['name']=='VIDEO_PLAY']
+        cohort=cohorts['viewers' if played else 'non_viewers'];cohort['sessions']+=1
+        for label,n in [('buy','BUY_BUTTON_CLICK'),('checkout','CHECKOUT_OPEN'),('paid','PAYMENT_SUCCESS')]:
+            reached=any(e['name']==n for e in es);cohort[label]+=reached
+            if played:after[label]+=any(e['name']==n and e['occurred_at']>=min(played) for e in es)
+        views={}
+        for e in es:
+            if not e['name'].startswith('VIDEO_'):continue
+            p=value(e['payload']);vid=p.get('video_view_id')
+            if not vid or 'video_watch_seconds' not in p:continue
+            v=views.setdefault(vid,{'watch':0,'percent':0,'duration':0})
+            v['watch']=max(v['watch'],p['video_watch_seconds']);v['percent']=max(v['percent'],p.get('video_completion_percent',0));v['duration']=max(v['duration'],p.get('video_duration_seconds',0))
+        snapshots.extend(v for v in views.values() if v['watch']>0)
+        if played:
+            ids=sorted({str(e['order_id']) for e in es if e.get('order_id')})
+            if ids:orders.append({'session_id':sid,'order_ids':ids})
+    for c in cohorts.values():
+        for name in ('buy','checkout','paid'):c[name+'_cr']=ratio(c[name],c['sessions'])
+        c['quality']='CONFIRMED' if c['sessions']>=20 else 'LOW SAMPLE'
+    return {**counts,'watch_seconds':distribution(v['watch'] for v in snapshots),
+            'completion_percent':distribution(v['percent'] for v in snapshots),
+            'after_video':after,'cohorts':cohorts,'order_links':orders,
+            'basis':'Pseudonymous sessions, not distinct people; association only, not causality',
+            'quality':'CONFIRMED' if counts['play']>=20 else 'LOW SAMPLE'}
 
 def money(rows, ad_spend, dispositions):
     """Never interprets returned condition, combined costs or no attribution as zero."""

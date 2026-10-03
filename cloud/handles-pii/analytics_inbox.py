@@ -3,7 +3,7 @@ import base64,json,uuid,datetime,re,math
 from urllib.parse import urlsplit
 
 ORIGIN='https://xn--163-5cdt3dgrs.xn--p1ai'
-CLIENT_EVENTS=set('SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
+CLIENT_EVENTS=set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
 
 def ensure(execute):
     execute('''CREATE TABLE IF NOT EXISTS analytics_inbox(
@@ -27,7 +27,7 @@ def ingest(event,execute):
         for e in data.get('events',[]):
             uuid.UUID(e['event_id'])
             if e['name'] not in CLIENT_EVENTS:raise ValueError()
-            if set(e)-{'event_id','name','timestamp','elapsed_ms','duration_sec','value','metric','error_code','page'}:raise ValueError()
+            if set(e)-{'event_id','name','timestamp','elapsed_ms','duration_sec','value','metric','error_code','page','video_view_id','video_watch_seconds','video_duration_seconds','video_completion_percent'}:raise ValueError()
         if set(data.get('attribution') or {})-set('yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()):raise ValueError()
         for e in data.get('events',[]):
             for key in ('elapsed_ms','duration_sec','value'):
@@ -35,6 +35,11 @@ def ingest(event,execute):
                     n=float(e[key])
                     if not math.isfinite(n) or n<0 or n>86400000:raise ValueError()
                     e[key]=n
+            for key in ('video_watch_seconds','video_duration_seconds','video_completion_percent'):
+                if key in e:
+                    n=e[key];limit=100 if key=='video_completion_percent' else 86400
+                    if isinstance(n,bool) or not isinstance(n,(float,int)) or not math.isfinite(n) or not 0<=n<=limit:raise ValueError()
+            if 'video_view_id' in e:e['video_view_id']=str(uuid.UUID(e['video_view_id']))
             if e.get('metric') not in (None,'LCP','INP','CLS','TTFB'):raise ValueError()
             if e.get('page') not in (None,'home','cart','checkout','order','article','other'):raise ValueError()
             if 'error_code' in e and not re.fullmatch(r'[A-Z_]{1,40}',str(e['error_code'])):raise ValueError()

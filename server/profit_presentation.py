@@ -119,6 +119,31 @@ def attention(r):
     if estimate:lines += ['💸 Возможная недополученная выручка: ≈ '+rub(estimate['rub']),'🟡 Оценка по обычной конверсии, не фактический убыток.']
     return lines
 
+
+def video_view(v,detail=False):
+    if not v:return []
+    w=v['watch_seconds'];p=v['completion_percent'];a=v['after_video']
+    lines=['',SEP,'🎥 ВИДЕО',
+           '👁 Увидели предложение посмотреть: '+number(v['cta_view']),
+           '▶️ Открыли видео: '+number(v['open']),
+           '🎬 Начали просмотр: '+number(v['play']),
+           '⏱ Среднее время: '+number(w['mean'],1,' сек'),
+           '📊 Средний просмотр: '+percent(p['mean']),
+           '✅ Досмотрели: '+number(v['complete']),
+           '🛒 Нажали «Купить» после просмотра: '+number(a['buy']),
+           '💰 Оплатили после просмотра: '+number(a['paid'])]
+    if detail:
+        lines += ['Медианное время: '+number(w['median'],1,' сек'),
+                  'Просмотрели 25% / 50% / 75%: '+ ' / '.join(number(v[k]) for k in ('viewers_25','viewers_50','viewers_75')),
+                  'Перешли к оформлению после просмотра: '+number(a['checkout'])]
+        for key,label in [('viewers','Смотрели видео'),('non_viewers','Не смотрели видео')]:
+            c=v['cohorts'][key]
+            lines += [label+': '+number(c['sessions'])+' сессий',
+                      'Купить / оформление / оплата: '+ ' / '.join(percent(c[k+'_cr']) for k in ('buy','checkout','paid'))]
+    if v['quality']!='CONFIRMED':lines.append('🟡 Пока мало данных для вывода.')
+    lines.append('Сравнение сессий показывает связь, а не причинность продажи.')
+    return lines
+
 def funnel_view(r,detail=False):
     f=r['instrumented_funnel'];lines=['🧭 ВОРОНКА']
     names=['SITE_SESSION','BUY_BUTTON_CLICK','CHECKOUT_OPEN','PVZ_PICKER_OPEN','PVZ_SELECTED','PAYMENT_STARTED','PAYMENT_SUCCESS']
@@ -127,6 +152,7 @@ def funnel_view(r,detail=False):
         lines.append(f'{STAGES[name]}: {number(n)}')
     if f['quality']!='CONFIRMED':lines.append(LOW)
     lines.append('Подробные события собираются с момента подключения; прошлые пробелы не считаются нулями.')
+    lines += video_view(f.get('video',{}),detail)
     if detail:
         lines += ['',SEP]+attention(r)
         for d in f['drops']:
