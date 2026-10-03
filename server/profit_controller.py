@@ -12,6 +12,7 @@ CAMPAIGN = 714566814
 MOSCOW = ZoneInfo('Europe/Moscow')
 MIN_BID, MAX_BID, STEP = Decimal('10'), Decimal('20'), Decimal('.5')
 LOCK = 714566814
+COGS_UNIT_RUB = 230  # Handle, packaging, handling and labor included; owner confirmed.
 
 
 def value_json(v):
@@ -64,6 +65,12 @@ def decision(bid, data, now, last_change=None):
     return ('hold', None, 'insufficient_evidence', False)
 
 
+def actual_cost_totals(rows):
+    paid = [r for r in rows if r['payment_status'] == 'succeeded']
+    return {k: sum(float(r[k]) for r in paid) if all(r.get(k) is not None for r in paid) else None
+            for k in ('yookassa', 'ozon', 'returns_other')}
+
+
 def economics(rows, ad_spend, clicks, impressions, costs):
     """Current status of an order cohort; received date is not inferred from creation."""
     def select(predicate):
@@ -83,10 +90,18 @@ def economics(rows, ad_spend, clicks, impressions, costs):
     ratio = lambda n, d: n / d if d else None
     spend = float(ad_spend)
     received = counts['received']
-    cogs, tax = received['units'] * 303, received['rub'] * .06
+    cogs, tax = received['units'] * COGS_UNIT_RUB, received['rub'] * .06
     cost_names = ('yookassa','ozon','returns_other')
-    complete = all(costs.get(k) is not None for k in cost_names)
-    contribution = received['rub'] - cogs - tax - sum(costs[k] for k in cost_names) if complete else None
+    received_rows = [r for r in rows if r['ozon_status'] == 'delivered']
+    # In-transit fees are reported, but not charged to another received cohort.
+    received_costs = {k: sum(float(r[k]) for r in received_rows)
+                      if all(r.get(k) is not None for r in received_rows) else
+                      costs.get(k) if len(received_rows) == len(rows) else None
+                      for k in cost_names}
+    complete = all(received_costs[k] is not None and costs.get(k) is not None for k in cost_names)
+    known = sum(v for v in received_costs.values() if v is not None)
+    provisional = received['rub'] - cogs - tax - known - spend
+    contribution = received['rub'] - cogs - tax - sum(received_costs.values()) if complete else None
     net = contribution - spend if complete else None
     return {'cohort_basis': 'order_created_at; current fulfillment status',
             'counts': counts, 'impressions': impressions, 'clicks': clicks,
@@ -94,7 +109,11 @@ def economics(rows, ad_spend, clicks, impressions, costs):
             'cr': {k: ratio(counts[k]['orders'] * 100, clicks) for k in ('ordered','paid','received')},
             'cac': {k: ratio(spend, counts[k]['orders']) for k in ('ordered','paid','received')},
             'aov': ratio(counts['paid']['rub'], counts['paid']['orders']),
-            'cogs_received': cogs, 'tax_received': tax, 'costs': costs,
+            'cogs_unit_rub': COGS_UNIT_RUB, 'cogs_received': cogs, 'tax_received': tax, 'costs': costs,
+            'received_costs': received_costs, 'other_costs_default_rub': 0,
+            'net_profit_before_unknown_costs': provisional,
+            'net_profit_status': 'FINAL' if complete else 'PROVISIONAL',
+            'missing_received_costs': [k for k in cost_names if received_costs[k] is None],
             'contribution': contribution, 'net_profit': net,
             'profit_per_received_order': ratio(net, received['orders']) if net is not None else None,
             'roas_paid': ratio(counts['paid']['rub'], spend),
@@ -337,7 +356,16 @@ class Controller:
                         item['return_number'],order_id,item['return_type'],item['status'])
                     matched+=1
                 cursor=result.get('next_cursor')
-                if not cursor:return {'available':True,'linked':matched,'unlinked':unlinked}
+                if not cursor:
+                    # A complete real returns read confirms no return charge for
+                    # unaffected current paid orders. Preserve any recorded charge.
+                    await c.execute('''UPDATE profit_controller_costs k SET returns_other=0,
+                        updated_at=NOW() FROM commerce_pending_orders p
+                        WHERE k.order_id=p.order_id AND k.returns_other IS NULL
+                        AND p.payment_status='succeeded' AND p.created_at >= $1
+                        AND coalesce(p.ozon_status,'') NOT IN ('canceled','returned')
+                        AND NOT EXISTS(SELECT 1 FROM profit_controller_returns r WHERE r.order_id=p.order_id)''',start)
+                    return {'available':True,'linked':matched,'unlinked':unlinked}
                 if cursor in seen:raise ValueError('repeated_return_cursor')
                 seen.add(cursor)
             return {'available':False,'reason':'pagination_limit','linked':matched,'unlinked':unlinked}
@@ -385,8 +413,7 @@ class Controller:
                 if await self.mutate(c,None,'suspend','critical_estimated_stock',emergency=True):
                     await self.put(c,'paused',{'day':today.isoformat(),'reason':'critical_stock','resume_allowed':False})
             paused = True
-        costs = {k:sum(float(r[k]) for r in orders) if orders and all(r[k] is not None for r in orders) else None
-                 for k in ('yookassa','ozon','returns_other')}
+        costs = actual_cost_totals(orders)
         econ = economics(orders,sum(r['Cost'] for r in stats),sum(r['Clicks'] for r in stats),
                          sum(r['Impressions'] for r in stats),costs)
         metric = await self.metrika(start_day,today)
@@ -428,7 +455,7 @@ class Controller:
                            all(r[k] is not None for k in ('yookassa','ozon','returns_other'))]
             contribution = None
             if matched and len(fully_costed)==len(matched):
-                contribution = sum(float(r['amount']) - r['quantity']*303 - float(r['amount'])*.06
+                contribution = sum(float(r['amount']) - r['quantity']*COGS_UNIT_RUB - float(r['amount'])*.06
                                    - sum(float(r[k]) for k in ('yookassa','ozon','returns_other')) for r in matched)
                 contribution -= sum(r['Cost'] for r in selected)
             data = {'clicks':sum(r['Clicks'] for r in selected),'impressions':sum(r['Impressions'] for r in selected),
@@ -487,24 +514,26 @@ class Controller:
             WHERE payment_status='succeeded' AND created_at >= $1''',since)
         remaining = max(0,anchor['estimated_units']-int(units))
         days = (now-since).total_seconds()/86400
-        return {'estimated_units':remaining,'as_of':now.isoformat(),'basis':'owner estimate 700 minus new PAID; returns are not restocked automatically',
+        return {'estimated_units':remaining,'valuation_rub':remaining*COGS_UNIT_RUB,
+                'cogs_unit_rub':COGS_UNIT_RUB,'as_of':now.isoformat(),'basis':'owner estimate 700 minus new PAID; returns are not restocked automatically',
                 'coverage_at_target_days':remaining/50,
                 'coverage_at_observed_velocity_days':remaining/(units/days) if days >= 1 and units else None,
                 'authoritative':False}
 
-    async def weekly(self, c, now):
+    async def weekly(self, c, now, preview=False):
         local = now.astimezone(MOSCOW)
-        if local.weekday() != 0 or local.hour < 9: return
-        end = datetime.combine(local.date(),datetime.min.time(),MOSCOW)
+        if not preview and (local.weekday() != 0 or local.hour < 9): return
+        end = now if preview else datetime.combine(local.date(),datetime.min.time(),MOSCOW)
         start = end - timedelta(days=7)
         key = 'weekly-' + end.date().isoformat()
-        if await c.fetchval('SELECT EXISTS(SELECT 1 FROM profit_controller_notifications WHERE key=$1)',key): return
-        stats = await self.report(start.date(),(end-timedelta(days=1)).date())
+        if not preview and await c.fetchval('SELECT EXISTS(SELECT 1 FROM profit_controller_notifications WHERE key=$1)',key): return
+        last_day = end.date() if preview else (end-timedelta(days=1)).date()
+        stats = await self.report(start.date(),last_day)
         orders = await self.order_cohort(c,start,end)
-        costs = {k:sum(float(r[k]) for r in orders) if orders and all(r[k] is not None for r in orders) else None for k in ('yookassa','ozon','returns_other')}
+        costs = actual_cost_totals(orders)
         e = economics(orders,sum(r['Cost'] for r in stats),sum(r['Clicks'] for r in stats),sum(r['Impressions'] for r in stats),costs)
         fmt = lambda v: 'неизвестно' if v is None else f'{v:.2f}'
-        lines = [f'📊 ОТЧЁТ ЗА НЕДЕЛЮ {start.date()} — {(end-timedelta(days=1)).date()}',
+        lines = [f'📊 ОТЧЁТ ЗА НЕДЕЛЮ {start.date()} — {last_day}',
                  'Когорта: заказы, созданные за неделю; текущий статус Ozon.',
                  f"Показы: {e['impressions']} | Клики: {e['clicks']} | CTR: {fmt(e['ctr'])}%",
                  f"Расход (с НДС): {fmt(e['spend'])} ₽ | CPC: {fmt(e['cpc'])} ₽"]
@@ -516,10 +545,15 @@ class Controller:
         stock = await self.stock(c,now)
         lines += [f"COGS полученных: {e['cogs_received']} ₽ | Tax 6%: {fmt(e['tax_received'])} ₽",
                   f"YooKassa: {fmt(costs['yookassa'])} ₽ | Ozon: {fmt(costs['ozon'])} ₽ | Возвраты/прочее: {fmt(costs['returns_other'])} ₽",
-                  f"NET PROFIT: {fmt(e['net_profit'])} ₽ | Profit/order: {fmt(e['profit_per_received_order'])} ₽",
+                  f"NET PROFIT ({e['net_profit_status']}): {fmt(e['net_profit'])} ₽ | Profit/order: {fmt(e['profit_per_received_order'])} ₽",
+                  f"До неизвестных расходов, только RECEIVED: {fmt(e['net_profit_before_unknown_costs'])} ₽; Ozon UNKNOWN не равен 0.",
+                  'COGS 230 ₽/шт включает упаковку, обработку и труд; отдельные расходы учитываются только по подтверждению.',
                   f"ROAS paid: {fmt(e['roas_paid'])} | ROAS received: {fmt(e['roas_received'])} | ROMI: {fmt(e['romi'])}",
-                  f"STOCK (оценка): {stock['estimated_units']} шт; покрытие по текущей скорости: {fmt(stock['coverage_at_observed_velocity_days'])} дней. При цели 50/день: {fmt(stock['coverage_at_target_days'])} дней."]
-        await self.notify(c,key,'\n'.join(lines))
+                  f"STOCK (оценка): {stock['estimated_units']} шт / {stock['valuation_rub']} ₽; покрытие по текущей скорости: {fmt(stock['coverage_at_observed_velocity_days'])} дней. При цели 50/день: {fmt(stock['coverage_at_target_days'])} дней."]
+        message = '\n'.join(lines)
+        if preview:
+            return {'preview':True,'notification_sent':False,'message':message,'economics':e,'stock':stock}
+        await self.notify(c,key,message)
 
     async def loop(self):
         while True:
