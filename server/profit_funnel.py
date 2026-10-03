@@ -501,7 +501,7 @@ class ProfitFunnel:
         f=current['instrumented_funnel'];n=f['counts'][first]
         if denominators>=100 and n>=20:
             missed=max(0,n*successes/denominators-f['counts'][last])
-            current['estimated_lost_revenue']={'rub':round(missed*1200,2),'basis':'Оценка, не фактический убыток','baseline_sessions':denominators}
+            current['estimated_lost_revenue']={'rub':round(missed*current['stock']['unit_price'],2),'basis':'Оценка, не фактический убыток','baseline_sessions':denominators}
         return result
 
     def text(self,r,command='today'):

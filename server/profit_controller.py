@@ -276,7 +276,7 @@ class Controller:
         checks = {}
         try:
             landing = await self.http.get('https://xn--163-5cdt3dgrs.xn--p1ai/', follow_redirects=True)
-            checks['landing'] = landing.status_code == 200 and ('data-offer-unit-price' in landing.text or '800' in landing.text) and 'Купить' in landing.text
+            checks['landing'] = landing.status_code == 200 and 'data-offer-unit-price' in landing.text and 'Купить' in landing.text
         except Exception:
             checks['landing'] = False
         try:
@@ -425,7 +425,7 @@ class Controller:
         campaigns=strategy_result.get('Campaigns',[])
         if len(campaigns)!=1 or campaigns[0]['Id']!=CAMPAIGN:raise DirectError('strategy_campaign_mismatch')
         search_strategy=campaigns[0].get('UnifiedCampaign',{}).get('BiddingStrategy',{}).get('Search',{}).get('BiddingStrategyType')
-        automatic_strategy=search_strategy!='MANUAL_CPC'
+        automatic_strategy=search_strategy not in ('MANUAL_CPC','HIGHEST_POSITION','LOWEST_COST')
         bid_result = {'KeywordBids':[]} if automatic_strategy else await self.api('keywordbids','get',{'SelectionCriteria':{'CampaignIds':[CAMPAIGN]},
             'FieldNames':['KeywordId','AdGroupId','CampaignId','ServingStatus'],
             'SearchFieldNames':['Bid','AuctionBids']})
@@ -519,7 +519,7 @@ class Controller:
         return {'estimated_units':remaining,'valuation_rub':remaining*COGS_UNIT_RUB,
                 'cogs_unit_rub':COGS_UNIT_RUB,'as_of':now.isoformat(),'basis':'InSales native available stock; no additional paid subtraction',
                 'coverage_at_target_days':remaining/50,'coverage_at_observed_velocity_days':remaining/velocity if velocity else None,
-                'authoritative':True}
+                'authoritative':True,'unit_price':catalog['unit_price']}
 
     async def weekly(self, c, now, preview=False):
         local = now.astimezone(MOSCOW)

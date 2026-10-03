@@ -5,7 +5,8 @@ from product_catalog import frozen_unit_price
 
 def normalize_street(value):
     value = ' '.join(str(value or '').split()).casefold()
-    return re.sub(r'^(?:улица|ул\.?)\s+', 'улица ', value)
+    value=re.sub(r'^(?:улица|ул\.?)\s+', 'улица ', value)
+    return re.sub(r'^(?:бульвар|б-р)\s+', 'бульвар ', value)
 
 def verify_native_proof(order, pending, order_key):
     """Validate native buyer JSON fetched server-side with its opaque order key."""
@@ -36,7 +37,7 @@ def verify_native_proof(order, pending, order_key):
     actual_address = ' '.join(str(address.get('address') or '').split()).casefold()
     full_address = ' '.join(snapshot['pickup_address'].split()).casefold()
     street_house = (expected_street + ' д. ' + expected_house).casefold()
-    if actual_address not in (full_address, street_house):
+    if actual_address not in (full_address, street_house) and normalize_street(actual_address)!=normalize_street(street_house):
         raise ValueError('Native street/house mismatch')
     if address.get('street') and normalize_street(address.get('street')) != normalize_street(expected_street):
         raise ValueError('Native street/house mismatch')

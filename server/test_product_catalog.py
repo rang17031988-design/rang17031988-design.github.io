@@ -1,8 +1,12 @@
 import unittest
 from product_catalog import read_catalog,frozen_unit_price,PRODUCT_ID,VARIANT_ID
 from unittest.mock import AsyncMock,Mock
+from native_order_proof import normalize_street
 
 class PriceTests(unittest.TestCase):
+    def test_native_boulevard_abbreviation(self):
+        self.assertEqual(normalize_street('б-р Ивана Финютина д. 9'),normalize_street('бульвар Ивана Финютина д. 9'))
+        self.assertNotEqual(normalize_street('б-р Ивана Финютина д. 8'),normalize_street('бульвар Ивана Финютина д. 9'))
     def test_new_quantities_and_history(self):
         for q in (1,2,3,4,5):
             self.assertEqual(frozen_unit_price({'quantity':q,'amount':1200*q},{'unit_price':1200}),1200)
