@@ -137,7 +137,7 @@ def funnel_view(r,detail=False):
 def readable_segment(key):
     parts=key.split('/');device,os,browser=(parts+['']*3)[:3]
     icon='🖥' if device=='DESKTOP' else '🍎' if os in ('iOS','iPadOS') else '🤖' if os=='Android' else '📱'
-    label='Компьютер' if device=='DESKTOP' else 'iPhone / iOS' if os=='iOS' else 'iPad' if os=='iPadOS' else os or 'Мобильное устройство'
+    label=('Компьютер'+(' / '+os if os else '')) if device=='DESKTOP' else 'iPhone / iOS' if os=='iOS' else 'iPad' if os=='iPadOS' else os or 'Мобильное устройство'
     browsers={'Yandex':'Яндекс.Браузер','Other':'Другой браузер','Chrome':'Chrome','Safari':'Safari','Edge':'Edge','Firefox':'Firefox'}
     return icon+' '+label+((' / '+browsers.get(browser,'Другой браузер')) if browser else '')
 
@@ -252,7 +252,7 @@ def render(r,command,worker=None):
         lines=sales(r)+['',SEP]+advertising(r)+['',SEP]+economy(r)+['',SEP]+attention(r)
         totals=r.get('metrika',{}).get('devices',{}).get('totals') or []
         lines.insert(0,'👥 Визиты Метрики: '+number(totals[0] if totals else None))
-        lines += ['', '🧭 Полная воронка: '+number(r['instrumented_funnel']['sessions'])+' измеренных сессий','🔎 Подробности — по кнопкам ниже.']
+        lines += ['', '🛠 Технические проблемы: '+('⚠️ Есть зарегистрированные ошибки — откройте раздел ниже.' if any(r['instrumented_funnel']['errors'].values()) or r['technical']['shipment_failures'] or r['technical']['status_sync_stale'] or any(v['state']=='failed' for v in r['technical']['service_messages']) else 'В доступных источниках не зарегистрированы.'), '🧭 Полная воронка: '+number(r['instrumented_funnel']['sessions'])+' измеренных сессий','🔎 Подробности — по кнопкам ниже.']
     elif command=='funnel':lines=funnel_view(r,True)
     elif command=='profit':lines=economy(r,True)
     elif command=='ads':lines=advertising(r,True)
