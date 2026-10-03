@@ -137,8 +137,8 @@ def funnel_view(r,detail=False):
 def readable_segment(key):
     parts=key.split('/');device,os,browser=(parts+['']*3)[:3]
     icon='🖥' if device=='DESKTOP' else '🍎' if os in ('iOS','iPadOS') else '🤖' if os=='Android' else '📱'
-    label=('Компьютер'+(' / '+os if os else '')) if device=='DESKTOP' else 'iPhone / iOS' if os=='iOS' else 'iPad' if os=='iPadOS' else os or 'Мобильное устройство'
-    browsers={'Yandex':'Яндекс.Браузер','Other':'Другой браузер','Chrome':'Chrome','Safari':'Safari','Edge':'Edge','Firefox':'Firefox'}
+    label=('Компьютер'+(' / '+{'Windows':'Виндоус','Linux':'Линукс','macOS':'макОС'}.get(os,os) if os else '')) if device=='DESKTOP' else 'iPhone / iOS' if os=='iOS' else 'iPad' if os=='iPadOS' else os or 'Мобильное устройство'
+    browsers={'Yandex':'Яндекс.Браузер','Other':'Другой браузер','Chrome':'Хром','Safari':'Сафари','Edge':'Эдж','Firefox':'Файрфокс'}
     return icon+' '+label+((' / '+browsers.get(browser,'Другой браузер')) if browser else '')
 
 def devices(r,browsers=False):
@@ -160,7 +160,7 @@ def devices(r,browsers=False):
         lines += ['',SEP,'📊 Визиты по данным Метрики:']
         for row in rows[:8]:
             dims=[x.get('name','') for x in row['dimensions']]
-            label=' / '.join(x.replace('Smartphones','Смартфоны').replace('PC','Компьютер').replace('Google Android','Android').replace('Yandex Browser','Яндекс.Браузер').replace('YandexBrowserCorp','Яндекс.Браузер').replace('Mobile Safari','Safari') for x in dims if x)
+            label=' / '.join(x.replace('Smartphones','Смартфоны').replace('PC','Компьютер').replace('Google Android','Android').replace('Yandex Browser','Яндекс.Браузер').replace('YandexBrowserCorp','Яндекс.Браузер').replace('Mobile Safari','Сафари').replace('Chrome Mobile','Хром мобильный').replace('Google Chrome','Хром').replace('HeadlessChrome','Хром без окна').replace('Firefox','Файрфокс').replace('Safari','Сафари').replace('Windows','Виндоус').replace('GNU/Linux','Линукс') for x in dims if x)
             lines.append('👥 '+label+': '+number(row['metrics'][0]))
         lines.append('Эти визиты не подставляются в неполную воронку оплат.')
     return lines
@@ -287,7 +287,7 @@ def keyboard(command='menu',period='today',page=0,total=1):
         if page:nav.append(button(command,'‹ Назад',idx=page-1))
         if page+1<total:nav.append(button(command,'Далее ›',idx=page+1))
         rows.append(nav)
-    rows.append([button(c,p=c) for c in ('today','yesterday','week')])
+    rows.append([button(c if command in ('menu','today','yesterday','week') else command,label=TITLES[c],p=c) for c in ('today','yesterday','week')])
     if command=='menu':
         for i in range(3,len(MENU),3):rows.append([button(c,label) for c,label in MENU[i:i+3]])
     elif command in ('today','yesterday','week'):
