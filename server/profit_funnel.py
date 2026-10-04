@@ -27,6 +27,7 @@ COMMANDS = 'today yesterday week funnel organic devices browsers speed ads profi
 CLIENT_EVENTS = set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
 STAGES = 'SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_LOADED PVZ_SELECTED PAYMENT_STARTED PAYMENT_SUCCESS ORDER_RECEIVED'.split()
 ATTR_KEYS = 'yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()
+ATTR_KEYS += [f'{side}_{field}' for side in ('first','last') for field in ('source','medium','campaign','content','term','yclid','referrer_host')]
 LOCK = 715029849
 
 
@@ -83,12 +84,14 @@ def safe_client(batch, ua, now=None):
         v = (batch.get('attribution') or {}).get(k)
         if v is not None:
             v = str(v)[:250]
-            if k in ('yclid','client_id') and not re.fullmatch(r'\d{1,100}', v): continue
+            if k in ('yclid','client_id','first_yclid','last_yclid') and not re.fullmatch(r'\d{1,100}', v): continue
+            if k.endswith('referrer_host') and not re.fullmatch(r'[a-zA-Z0-9.-]{1,120}',v):continue
             if '@' in v or re.search(r'\+7\d{10}|\d{7,12}:[\w-]{25,}',v): continue
             a[k] = v
     referrer = str(batch.get('referrer_host') or '')[:120]
     if not re.fullmatch(r'[a-zA-Z0-9.-]*',referrer): referrer = ''
     if referrer:a['referrer_host']=referrer
+    elif a.get('last_referrer_host'):a['referrer_host']=a['last_referrer_host']
     if a:a.update(traffic_attribution.touch_fields(a))
     events = []
     for e in batch.get('events', [])[:30]:
@@ -382,10 +385,13 @@ class ProfitFunnel:
                     ON CONFLICT(session_id) DO UPDATE SET last_seen=GREATEST(profit_funnel_sessions.last_seen,EXCLUDED.last_seen),
                     checkout_session_id=coalesce(EXCLUDED.checkout_session_id,profit_funnel_sessions.checkout_session_id),
                     attribution=(profit_funnel_sessions.attribution||EXCLUDED.attribution)||jsonb_build_object(
-                        'first_source',COALESCE(profit_funnel_sessions.attribution->'first_source',EXCLUDED.attribution->'first_source'),
-                        'first_medium',COALESCE(profit_funnel_sessions.attribution->'first_medium',EXCLUDED.attribution->'first_medium'),
-                        'first_campaign',COALESCE(profit_funnel_sessions.attribution->'first_campaign',EXCLUDED.attribution->'first_campaign'),
-                        'first_content',COALESCE(profit_funnel_sessions.attribution->'first_content',EXCLUDED.attribution->'first_content')),
+                        'first_source',COALESCE(NULLIF(profit_funnel_sessions.attribution->'first_source','null'::jsonb),EXCLUDED.attribution->'first_source'),
+                        'first_medium',COALESCE(NULLIF(profit_funnel_sessions.attribution->'first_medium','null'::jsonb),EXCLUDED.attribution->'first_medium'),
+                        'first_campaign',COALESCE(NULLIF(profit_funnel_sessions.attribution->'first_campaign','null'::jsonb),EXCLUDED.attribution->'first_campaign'),
+                        'first_content',COALESCE(NULLIF(profit_funnel_sessions.attribution->'first_content','null'::jsonb),EXCLUDED.attribution->'first_content'),
+                        'first_term',COALESCE(NULLIF(profit_funnel_sessions.attribution->'first_term','null'::jsonb),EXCLUDED.attribution->'first_term'),
+                        'first_yclid',COALESCE(NULLIF(profit_funnel_sessions.attribution->'first_yclid','null'::jsonb),EXCLUDED.attribution->'first_yclid'),
+                        'first_referrer_host',COALESCE(NULLIF(profit_funnel_sessions.attribution->'first_referrer_host','null'::jsonb),EXCLUDED.attribution->'first_referrer_host')),
                     is_test=profit_funnel_sessions.is_test OR EXCLUDED.is_test,
                     is_internal=profit_funnel_sessions.is_internal OR EXCLUDED.is_internal,
                     traffic_class=CASE WHEN profit_funnel_sessions.is_test OR EXCLUDED.is_test THEN 'internal_test' WHEN EXCLUDED.is_internal THEN EXCLUDED.traffic_class ELSE profit_funnel_sessions.traffic_class END''',

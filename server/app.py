@@ -1163,6 +1163,21 @@ class AttributionIn(BaseModel):
     utm_content: str | None = Field(default=None, max_length=250)
     utm_term: str | None = Field(default=None, max_length=250)
     source_token: str | None = Field(default=None, max_length=250)
+    first_source: str | None = Field(default=None,max_length=250)
+    first_medium: str | None = Field(default=None,max_length=250)
+    first_campaign: str | None = Field(default=None,max_length=250)
+    first_content: str | None = Field(default=None,max_length=250)
+    first_term: str | None = Field(default=None,max_length=250)
+    first_yclid: str | None = Field(default=None,pattern=r'^\d{1,100}$')
+    first_referrer_host: str | None = Field(default=None,pattern=r'^[a-zA-Z0-9.-]{1,120}$')
+    last_source: str | None = Field(default=None,max_length=250)
+    last_medium: str | None = Field(default=None,max_length=250)
+    last_campaign: str | None = Field(default=None,max_length=250)
+    last_content: str | None = Field(default=None,max_length=250)
+    last_term: str | None = Field(default=None,max_length=250)
+    last_yclid: str | None = Field(default=None,pattern=r'^\d{1,100}$')
+    last_referrer_host: str | None = Field(default=None,pattern=r'^[a-zA-Z0-9.-]{1,120}$')
+    referrer_host: str | None = Field(default=None,pattern=r'^[a-zA-Z0-9.-]{1,120}$')
 
 class PendingOrderIn(BaseModel):
     owner_marker: str | None = Field(default=None,max_length=500)
@@ -1208,9 +1223,9 @@ async def create_pending_order(body: PendingOrderIn):
             session_attr=await c.fetchval('''SELECT attribution FROM profit_funnel_sessions
                 WHERE session_id=$1 OR checkout_session_id=$1 ORDER BY started_at ASC LIMIT 1''',str(body.session_id))
             session_attr=_json_value(session_attr,{})
-            for field in ('source','medium','campaign','content'):
-                if 'first_'+field in session_attr:touches['first_'+field]=session_attr['first_'+field]
-            if session_attr.get('referrer_host'):attr['referrer_host']=session_attr['referrer_host']
+            for field in ('source','medium','campaign','content','term','yclid','referrer_host'):
+                if session_attr.get('first_'+field) is not None:touches['first_'+field]=session_attr['first_'+field]
+            if session_attr.get('referrer_host') and not attr.get('referrer_host'):attr['referrer_host']=session_attr['referrer_host']
         touches.update(traffic_attribution.classify(attr,attr.get('referrer_host','')))
         snapshot['attribution']=attr|touches|{'session_id':str(body.session_id)}
         snapshot.update(internal_order_token=token, pickup_title=point['point_name'],

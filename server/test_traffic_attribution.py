@@ -1,7 +1,15 @@
 import unittest
-from traffic_attribution import classify,source_report
+from traffic_attribution import classify,source_report,touch_fields
 
 class AttributionTests(unittest.TestCase):
+    def test_cross_session_first_and_last_remain_distinct(self):
+        result=touch_fields({'first_source':'yandex','first_campaign':'714566814','first_yclid':'123',
+            'utm_source':'telegram','utm_campaign':'external_groups','last_source':'telegram'})
+        self.assertEqual(result['first_source'],'yandex')
+        self.assertEqual(result['first_yclid'],'123')
+        self.assertEqual(result['last_campaign'],'external_groups')
+        self.assertEqual(result['primary_attribution'],'TELEGRAM_EXTERNAL')
+        self.assertFalse(result['paid_evidence'])
     def test_paid_evidence_and_placement(self):
         self.assertFalse(classify({'utm_campaign':'714566814'})['paid_evidence'])
         self.assertEqual(classify({'yclid':'123','utm_campaign':'715029848'})['primary_attribution'],'PAID_RSYA')

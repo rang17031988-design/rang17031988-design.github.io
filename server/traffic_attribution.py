@@ -7,8 +7,12 @@ PAID_MEDIA={'cpc','ppc','paid','paidsearch','paid_search'}
 def touch_fields(a):
     result={}
     for side in ('first','last'):
-        for field in ('source','medium','campaign','content'):
-            result[side+'_'+field]=str(a.get('utm_'+field) or '')[:250] or None
+        for field in ('source','medium','campaign','content','term'):
+            result[side+'_'+field]=str(a.get(side+'_'+field) or a.get('utm_'+field) or '')[:250] or None
+        value=str(a.get(side+'_yclid') or '')
+        result[side+'_yclid']=value if re.fullmatch(r'\d{1,100}',value) else None
+        host=str(a.get(side+'_referrer_host') or '')
+        result[side+'_referrer_host']=host if re.fullmatch(r'[a-zA-Z0-9.-]{1,120}',host) else None
     result.update(classify(a,a.get('referrer_host','')))
     return result
 
