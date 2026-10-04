@@ -79,7 +79,7 @@ def technical_paid_health(checks):
 
 
 def cpa_decision(current,data,now,last_change=None):
-    """Only observed verified sales and complete economics justify scaling."""
+    """Separate a bounded delivery probe from proven profitable scaling."""
     current=Decimal(str(current))
     if not CPA_MIN<=current<=CPA_MAX:return 'REVIEW',None,'outside_owner_range'
     if data.get('paused'):return 'PAUSED',None,'owner_pause'
@@ -89,12 +89,21 @@ def cpa_decision(current,data,now,last_change=None):
     if not data.get('health'):return 'BLOCKED_FUNNEL',None,'health_or_attribution_unverified'
     if last_change and now-last_change<timedelta(hours=24):return 'HOLD',None,'24h_cooldown'
     cap=data.get('economic_max')
-    if cap is None:return 'HOLD',None,'economics_unknown'
-    cap=min(CPA_MAX,Decimal(str(cap)))
-    if cap<CPA_MIN:return 'SUSPEND',None,'economic_cap_below_minimum'
-    if current>cap:return 'SUSPEND',None,'economic_cap_below_current'
+    if cap is not None:
+        cap=min(CPA_MAX,Decimal(str(cap)))
+        if cap<CPA_MIN:return 'SUSPEND',None,'economic_cap_below_minimum'
+        if current>cap:return 'SUSPEND',None,'economic_cap_below_current'
     paid=data.get('paid_7d',0);clicks=data.get('clicks_7d',0)
     if clicks>=30 and paid==0:return 'HOLD',None,'traffic_without_verified_payments'
+    # Owner permits pre-PAID delivery discovery, not a claim of profitability.
+    # Use two full healthy calendar days in the current verified CPA regime;
+    # older CPC reports and an unobserved cost cannot be treated as evidence.
+    if paid==0 and data.get('prepaid_probe_ready'):
+        target=min(CPA_MAX,current+CPA_STEP)
+        if target>current and (cap is None or target<=cap) and Decimal(str(data['balance']))>=target:
+            return 'SET',target,'prepaid_delivery_probe_unknown_economics' if cap is None else 'prepaid_delivery_probe'
+        return 'HOLD',None,'prepaid_probe_cap_or_balance'
+    if cap is None:return 'HOLD',None,'economics_unknown'
     if paid>=3 and data.get('cac_paid') is not None and Decimal(str(data['cac_paid']))>cap:
         return ('SET',max(CPA_MIN,current-CPA_STEP),'cac_above_margin') if current>CPA_MIN else ('SUSPEND',None,'cac_above_margin_at_minimum')
     if data.get('observed_days',0)>=2 and data.get('delivery_limited') and paid>=3 and data.get('attribution_complete'):
@@ -102,6 +111,22 @@ def cpa_decision(current,data,now,last_change=None):
         if current<target<=cap:return 'SET',target,'verified_profitable_volume_limited'
     if data.get('lower_cpa_preserves_paid') and paid>=3 and current>CPA_MIN:return 'SET',current-CPA_STEP,'lower_cost_preserves_verified_paid'
     return 'HOLD',None,'insufficient_scaling_evidence'
+
+
+def prepaid_delivery_window(previous,now,healthy,stats):
+    """Two complete Moscow days, excluding the transition day and today's partial day."""
+    since=previous.get('delivery_probe_since') if previous.get('delivery_probe_policy_version')==1 else None
+    if not since or not healthy:since=now.isoformat()
+    first=datetime.fromisoformat(since).astimezone(MOSCOW).date()+timedelta(days=1)
+    today=now.astimezone(MOSCOW).date()
+    days=max(0,(today-first).days)
+    start=max(first,today-timedelta(days=2))
+    rows=[r for r in stats if start.isoformat()<=r['Date']<today.isoformat()]
+    impressions=sum(r['Impressions'] for r in rows);clicks=sum(r['Clicks'] for r in rows)
+    return {'delivery_probe_policy_version':1,'delivery_probe_since':since,
+            'complete_days':days,'window_start':start.isoformat(),'window_end_exclusive':today.isoformat(),
+            'impressions':impressions,'clicks':clicks,
+            'ready':bool(healthy and days>=2 and impressions<100 and clicks<10)}
 
 
 def economics(rows, ad_spend, clicks, impressions, costs):
@@ -738,9 +763,12 @@ class Controller:
                 economic_max=max(Decimal(0),min(margins)-Decimal(str(risk['rub_per_order'])))
             previous=await self.state(c,'cpa:'+str(cid)) or {}
             first=previous.get('first_observed_at',now.isoformat());observed=(now-datetime.fromisoformat(first)).total_seconds()/86400
+            probe=prepaid_delivery_window(previous,now,verified and technical_paid_health(checks)
+                and campaign['State']=='ON' and campaign['Status']=='ACCEPTED' and not pause and not unresolved,stats)
             data={'paused':pause,'strategy_verified':verified,'balance':balance,'health':technical_paid_health(checks),
                 'economic_max':economic_max,'paid_7d':paid,'clicks_7d':clicks,'cac_paid':float(spend/paid) if paid else None,
-                'observed_days':observed,'delivery_limited':impressions<100,'attribution_complete':paid>=3 and checks['paid_delivery_proven']}
+                'observed_days':observed,'delivery_limited':impressions<100,'attribution_complete':paid>=3 and checks['paid_delivery_proven'],
+                'prepaid_probe_ready':probe['ready']}
             state,target,reason=cpa_decision(current,data,now,last)
             emergency=(not verified or service.get('failures',0)>=2 or (cid==715029848 and not (await self.state(c,'rsya_continuation_applied')) and spend>=Decimal(900)))
             if emergency and campaign['State']=='ON' and not unresolved and not pause:
@@ -765,6 +793,9 @@ class Controller:
                 'reason':reason,'last_change':last.isoformat() if last else None,'checked_at':now.isoformat(),
                 'evaluated_at':now.isoformat() if due else evaluated,'first_observed_at':first,
                 'economic_max':float(economic_max) if economic_max is not None else None,'health_checks':checks,
+                'delivery_probe_policy_version':probe['delivery_probe_policy_version'],
+                'delivery_probe_since':probe['delivery_probe_since'],'delivery_probe_window':probe,
+                'economics_status':'UNKNOWN' if economic_max is None else 'OBSERVED',
                 'balance':float(balance) if balance is not None else None,'budget_unchanged':True}
             await self.put(c,'cpa:'+str(cid),record);summary.append(record)
         await self.put(c,'cpa_monitor',{'hour':hour.isoformat(),'campaigns':summary,'min_cpa':100,'max_cpa':350,'step':25,'cooldown_hours':24,'no_funding':True,'state':'ACTIVE' if all(x['agent_state']=='ACTIVE' for x in summary) else 'ERROR' if any(x['agent_state']=='ERROR' for x in summary) else 'PAUSED' if any(x['agent_state']=='PAUSED' for x in summary) else 'WAITING'})

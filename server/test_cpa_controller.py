@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime,timedelta,timezone
 from decimal import Decimal
-from profit_controller import cpa_decision,technical_paid_health
+from profit_controller import cpa_decision,technical_paid_health,prepaid_delivery_window
 
 class CPAGuards(unittest.TestCase):
     def setUp(self):
@@ -32,6 +32,36 @@ class CPAGuards(unittest.TestCase):
         self.assertTrue(technical_paid_health({'paid_dedupe_ready':True,'paid_server_enabled':True,'paid_delivery_proven':False}))
         self.assertFalse(technical_paid_health({'paid_dedupe_ready':False,'paid_delivery_proven':True}))
         self.assertEqual(self.decision(economic_max=None,paid_7d=0,attribution_complete=False)[:2],('HOLD',None))
+
+    def test_prepaid_probe_can_raise_without_imagined_profit(self):
+        self.assertEqual(self.decision(economic_max=None,paid_7d=0,attribution_complete=False,
+            prepaid_probe_ready=True),('SET',Decimal(125),'prepaid_delivery_probe_unknown_economics'))
+        self.assertEqual(self.decision(economic_max=None,paid_7d=1,prepaid_probe_ready=True)[0],'HOLD')
+        self.assertEqual(self.decision(350,economic_max=None,paid_7d=0,prepaid_probe_ready=True)[0],'HOLD')
+        self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,balance=110)[0],'HOLD')
+        self.assertEqual(self.decision(economic_max=110,paid_7d=0,prepaid_probe_ready=True)[:2],('HOLD',None))
+
+    def test_probe_cannot_bypass_funnel_pause_or_cooldown(self):
+        data=self.data|{'economic_max':None,'paid_7d':0,'prepaid_probe_ready':True}
+        self.assertEqual(cpa_decision(100,data,self.now,self.now-timedelta(hours=23))[2],'24h_cooldown')
+        for changes,state in [({'health':False},'BLOCKED_FUNNEL'),({'paused':True},'PAUSED'),
+                              ({'strategy_verified':False},'BLOCKED'),({'clicks_7d':30},'HOLD')]:
+            self.assertEqual(cpa_decision(100,data|changes,self.now)[0],state)
+
+    def test_probe_needs_full_days_current_regime_and_low_delivery(self):
+        previous={'delivery_probe_policy_version':1,'delivery_probe_since':'2026-10-01T10:00:00+00:00'}
+        rows=[{'Date':'2026-10-01','Impressions':9999,'Clicks':99},
+              {'Date':'2026-10-02','Impressions':5,'Clicks':0},
+              {'Date':'2026-10-03','Impressions':8,'Clicks':1},
+              {'Date':'2026-10-04','Impressions':999,'Clicks':40}]
+        probe=prepaid_delivery_window(previous,self.now,True,rows)
+        self.assertTrue(probe['ready']);self.assertEqual(probe['impressions'],13)
+        self.assertFalse(prepaid_delivery_window({},self.now,True,rows)['ready'])
+        self.assertFalse(prepaid_delivery_window(previous,self.now,False,rows)['ready'])
+        self.assertFalse(prepaid_delivery_window(previous,self.now,True,rows+
+            [{'Date':'2026-10-03','Impressions':100,'Clicks':0}])['ready'])
+        self.assertFalse(prepaid_delivery_window(previous,self.now,True,rows+
+            [{'Date':'2026-10-03','Impressions':0,'Clicks':9}])['ready'])
 
 
 class ContinuationTests(unittest.IsolatedAsyncioTestCase):
