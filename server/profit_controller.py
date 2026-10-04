@@ -168,6 +168,7 @@ class Controller:
 
     async def schema(self, c):
         await c.execute('''
+            SELECT pg_advisory_xact_lock(714566815);
             CREATE TABLE IF NOT EXISTS profit_controller_state (
                 key TEXT PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW());
             CREATE TABLE IF NOT EXISTS profit_controller_snapshots (
@@ -643,8 +644,8 @@ class Controller:
         try:
             checkout=await self.http.get('https://xn--163-5cdt3dgrs.xn--p1ai/gocheckout',follow_redirects=True)
             checks['checkout']=checkout.status_code==200 and ('checkout' in checkout.text.lower())
-            pvz=await self.http.get('https://ozon-delivery-gateway-production.up.railway.app/api/ozon/points',params={'city':'Самара','limit':1})
-            checks['pvz']=pvz.status_code==200 and bool(pvz.json().get('points'))
+            pvz=await self.http.get('https://ozon-delivery-gateway-production.up.railway.app/api/ozon/points',params={'city':'Самара','query':'Самара','limit':1})
+            checks['pvz']=pvz.status_code==200 and bool(pvz.json().get('items'))
             metrika=await self.http.get('https://api-metrika.yandex.net/management/v1/counter/112544007/goals',headers={'Authorization':'OAuth '+os.getenv('METRIKA_OAUTH_TOKEN','')})
             checks['metrika_goal']=metrika.status_code==200 and any(g.get('id')==PAID_GOAL for g in metrika.json().get('goals',[]))
         except Exception:checks['external_health']=False
@@ -653,6 +654,9 @@ class Controller:
         checks['no_failed_paid_uploads']=not await c.fetchval("SELECT EXISTS(SELECT 1 FROM commerce_paid_conversions WHERE state IN ('linkage_failure','unknown','failed'))")
         checks['no_mass_errors']=not await c.fetchval("SELECT count(*)>=10 FROM profit_funnel_events WHERE occurred_at>NOW()-INTERVAL '1 hour' AND name IN ('JS_ERROR','PAYMENT_ERROR','PVZ_TIMEOUT')")
         today=now.astimezone(MOSCOW).date();start=today-timedelta(days=6)
+        cost_start=datetime.combine(start,datetime.min.time(),MOSCOW)
+        await self.actual_payment_costs(c,cost_start,now)
+        await self.actual_returns(c,cost_start)
         pause=bool(await self.state(c,'cpa_owner_paused'))
         summary=[]
         for campaign in campaigns:

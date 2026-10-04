@@ -21,7 +21,7 @@ def ingest(event,execute):
         if event.get('isBase64Encoded'):raw=base64.b64decode(raw).decode('utf-8')
         if len(raw)>16000:return response(413,{'ok':False})
         data=json.loads(raw);sid=str(uuid.UUID(data['session_id']));bid=str(uuid.UUID(data['batch_id']))
-        allowed_top={'session_id','checkout_session_id','attribution','referrer_host','new_visitor','events','batch_id'}
+        allowed_top={'session_id','checkout_session_id','attribution','referrer_host','new_visitor','events','batch_id','is_test','is_internal'}
         if set(data)-allowed_top:raise ValueError()
         if len(data.get('events',[]))>30:raise ValueError()
         for e in data.get('events',[]):
@@ -53,6 +53,8 @@ def ingest(event,execute):
         if '@' in data['referrer_host']:data['referrer_host']=''
         if data.get('checkout_session_id'):data['checkout_session_id']=str(uuid.UUID(data['checkout_session_id']))
         data['new_visitor']=bool(data.get('new_visitor'))
+        data['is_test']=data.get('is_test') is True
+        data['is_internal']=data.get('is_internal') is True
         data['client_ua']=headers.get('user-agent','')[:500]
         execute('''DECLARE $id AS Utf8;DECLARE $payload AS Utf8;
             UPSERT INTO analytics_inbox(batch_id,payload,created_at,expire_at)
