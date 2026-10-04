@@ -8,7 +8,7 @@ UNKNOWN='🟡 Пока нет данных'
 LOW='🟡 Мало данных для надёжного сравнения'
 SEP='──────────────'
 MENU=[('today','📊 Сегодня'),('yesterday','📅 Вчера'),('week','📆 Неделя'),
-      ('funnel','🧭 Воронка'),('profit','💰 Прибыль'),('ads','📣 Реклама'),
+      ('funnel','🧭 Воронка'),('profit','💰 Прибыль'),('ads','📣 Реклама'),('organic','🌱 Органика'),
       ('devices','📱 Устройства'),('browsers','🌐 Браузеры'),('speed','⚡ Скорость'),
       ('orders','📦 Заказы'),('returns','↩️ Возвраты'),('stock','🏪 Склад'),
       ('errors','🛠 Ошибки'),('status','❤️ Система'),('cpa','🤖 CPA-контроллер')]
@@ -75,6 +75,11 @@ def advertising(r,detail=False):
             lines += [f'📦 Связанные заказы: {number(attributed["orders"])}',f'💳 Связанные оплаты: {number(attributed["paid"])}',f'🎯 Стоимость связанной оплаты: {rub(attributed["cac"])}']
         else:lines.append('🏷 Связь клика с оплатой: пока нет данных')
     if detail:
+        demand=r.get('wordstat_demand',{})
+        lines += ['', '🔎 WORDSTAT: '+demand.get('state','UNKNOWN'),
+            'Режим: '+demand.get('mode','UNKNOWN'),
+            'Кластеры: '+number(len(demand.get('clusters',[]))),
+            'Это сигнал спроса, не число доступных показов Direct.']
         monitor=r.get('cpa_controller',{})
         lines += ['', '🤖 CPA AGENT: '+monitor.get('state','UNKNOWN')]
         for v in monitor.get('campaigns',[]):
@@ -299,6 +304,21 @@ def customer_operations(r):
     lines.append('Отправлено — принято API. Доставлено — подтверждено почтовым сервером; прочтение не подтверждается.')
     return lines
 
+def source_view(r, organic=False):
+    names={'PAID_SEARCH':'Поиск Direct','PAID_RSYA':'РСЯ','ORGANIC_SEARCH':'Органический поиск',
+        'TELEGRAM_OWNED':'Telegram: собственный канал','TELEGRAM_EXTERNAL':'Telegram: внешние группы',
+        'DZEN_ORGANIC':'Дзен','PINTEREST_ORGANIC':'Pinterest','OK_ORGANIC':'ОК',
+        'BLUESKY_ORGANIC':'Bluesky','REFERRAL_OTHER':'Другие переходы','DIRECT':'Прямые визиты','UNKNOWN':'Неизвестный источник'}
+    lines=['🌱 ОРГАНИКА' if organic else '🏷 ИСТОЧНИКИ']
+    groups=r.get('source_attribution',{})
+    if not groups:return lines+[UNKNOWN]
+    for key,e in groups.items():
+        if organic and key in ('PAID_SEARCH','PAID_RSYA','UNKNOWN','OWNER','INTERNAL_TEST'):continue
+        lines += ['',names.get(key,key)+': '+number(e['sessions'])+' визитов',
+            'Оплаты: '+number(e['paid'])+' • выручка: '+rub(e['revenue']),
+            'CR PAID: '+percent(e['paid_cr'])]
+    return lines+['Одна оплата относится к одному основному источнику. Мало данных — без выводов о росте.']
+
 def render(r,command,worker=None):
     worker=worker or {};header=[TITLES.get(command,'📊 ПУЛЬТ ВЛАДЕЛЬЦА').upper(),period_text(r)]
     if r['day_not_finished']:header.append('⏱ День ещё не завершён')
@@ -308,7 +328,12 @@ def render(r,command,worker=None):
         totals=r.get('metrika',{}).get('devices',{}).get('totals') or []
         lines.insert(0,'👥 Визиты Метрики: '+number(totals[0] if totals else None))
         lines += ['', '🛠 Технические проблемы: '+('⚠️ Есть зарегистрированные ошибки — откройте раздел ниже.' if any(r['instrumented_funnel']['errors'].values()) or r['technical']['shipment_failures'] or r['technical']['status_sync_stale'] or any(v['state']=='failed' for v in r['technical']['service_messages']) else 'В доступных источниках не зарегистрированы.'), '🧭 Полная воронка: '+number(r['instrumented_funnel']['sessions'])+' измеренных сессий','🔎 Подробности — по кнопкам ниже.']
-    elif command=='funnel':lines=funnel_view(r,True)
+    elif command=='funnel':
+        lines=funnel_view(r,True)
+        for label,f in r.get('funnel_slices',{}).items():
+            lines += ['',label+' • '+number(f['sessions'])+' сессий',
+                'Купить / checkout / PAID: '+' / '.join(number(f['counts'].get(k)) for k in ('BUY_BUTTON_CLICK','CHECKOUT_OPEN','PAYMENT_SUCCESS'))]
+    elif command=='organic':lines=source_view(r,True)
     elif command=='profit':lines=economy(r,True)
     elif command=='ads':lines=advertising(r,True)
     elif command in ('devices','browsers'):lines=devices(r,command=='browsers')

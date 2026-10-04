@@ -19,10 +19,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import profit_presentation as presentation
+import traffic_attribution
 
 MSK = ZoneInfo('Europe/Moscow')
 UTC = timezone.utc
-COMMANDS = 'today yesterday week funnel devices browsers speed ads profit orders returns stock errors status cpa cpa_pause cpa_resume'.split()
+COMMANDS = 'today yesterday week funnel organic devices browsers speed ads profit orders returns stock errors status cpa cpa_pause cpa_resume'.split()
 CLIENT_EVENTS = set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
 STAGES = 'SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_LOADED PVZ_SELECTED PAYMENT_STARTED PAYMENT_SUCCESS ORDER_RECEIVED'.split()
 ATTR_KEYS = 'yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()
@@ -61,17 +62,7 @@ def distribution(numbers):
 
 
 def channel(a, referrer=''):
-    a = a or {}
-    source, medium, campaign = (str(a.get(k) or '').lower() for k in ('utm_source','utm_medium','utm_campaign'))
-    if campaign == '715029848': return 'YANDEX_RSYA'
-    if campaign == '714566814': return 'YANDEX_SEARCH'
-    if source in ('yandex','ya') and medium in ('cpc','ppc'): return 'OTHER_YANDEX_PAID'
-    for aliases, name in [(('telegram','tg'), 'TELEGRAM'), (('dzen','zen'), 'DZEN'),
-                          (('pinterest',), 'PINTEREST'), (('ok','odnoklassniki'), 'ODNOKLASSNIKI'),
-                          (('bluesky','bsky'), 'BLUESKY')]:
-        if source in aliases: return name
-    if medium == 'organic' or (not source and re.search(r'(yandex|google|bing)\.', referrer)): return 'SEO_ORGANIC'
-    return 'DIRECT' if not source and not referrer else 'OTHER'
+    return traffic_attribution.legacy_channel(a, referrer)
 
 
 def device(ua):
@@ -97,6 +88,8 @@ def safe_client(batch, ua, now=None):
             a[k] = v
     referrer = str(batch.get('referrer_host') or '')[:120]
     if not re.fullmatch(r'[a-zA-Z0-9.-]*',referrer): referrer = ''
+    if referrer:a['referrer_host']=referrer
+    if a:a.update(traffic_attribution.touch_fields(a))
     events = []
     for e in batch.get('events', [])[:30]:
         if e.get('name') not in CLIENT_EVENTS: raise ValueError('non_client_event')
@@ -388,7 +381,11 @@ class ProfitFunnel:
                     VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$9,$10,$11,$12)
                     ON CONFLICT(session_id) DO UPDATE SET last_seen=GREATEST(profit_funnel_sessions.last_seen,EXCLUDED.last_seen),
                     checkout_session_id=coalesce(EXCLUDED.checkout_session_id,profit_funnel_sessions.checkout_session_id),
-                    attribution=profit_funnel_sessions.attribution||EXCLUDED.attribution,
+                    attribution=(profit_funnel_sessions.attribution||EXCLUDED.attribution)||jsonb_build_object(
+                        'first_source',COALESCE(profit_funnel_sessions.attribution->'first_source',EXCLUDED.attribution->'first_source'),
+                        'first_medium',COALESCE(profit_funnel_sessions.attribution->'first_medium',EXCLUDED.attribution->'first_medium'),
+                        'first_campaign',COALESCE(profit_funnel_sessions.attribution->'first_campaign',EXCLUDED.attribution->'first_campaign'),
+                        'first_content',COALESCE(profit_funnel_sessions.attribution->'first_content',EXCLUDED.attribution->'first_content')),
                     is_test=profit_funnel_sessions.is_test OR EXCLUDED.is_test,
                     is_internal=profit_funnel_sessions.is_internal OR EXCLUDED.is_internal,
                     traffic_class=CASE WHEN profit_funnel_sessions.is_test OR EXCLUDED.is_test THEN 'internal_test' WHEN EXCLUDED.is_internal THEN EXCLUDED.traffic_class ELSE profit_funnel_sessions.traffic_class END''',
@@ -517,6 +514,7 @@ class ProfitFunnel:
                 dispositions.setdefault(ret['order_id'],{})['has_return']=True
             stock=await self.controller.stock(c,now)
             cpa=await self.controller.state(c,'cpa_monitor') or {}
+            demand=await self.controller.state(c,'wordstat_demand') or {}
             # Physical inspection alone may mark a returned item resellable/damaged.
             stock['confirmed_resellable_return_units']=sum(r['quantity'] for r in rows if dispositions.get(r['order_id'],{}).get('condition')=='resellable')
             # Native stock already includes its real stock events; never deduct PAID or add returns twice.
@@ -548,6 +546,15 @@ class ProfitFunnel:
         economics=money(rows,spend,dispositions)
         if ads.get('quality')=='UNKNOWN':economics.update(final_net_profit=None,advertising=None,quality='PROVISIONAL',profit_before_unknown_basis='advertising also UNKNOWN')
         f=funnel(events,sessions)
+        slices={}
+        for label in ('PAID','FREE'):
+            selected=[]
+            for s in sessions:
+                attr=value(s.get('attribution')) or {}
+                source=traffic_attribution.classify(attr,attr.get('referrer_host',''))
+                if (source['paid_evidence'] if label=='PAID' else not source['paid_evidence'] and source['primary_attribution']!='UNKNOWN'):
+                    selected.append(s)
+            slices[label]=funnel(events,selected)
         channels={}
         for s in sessions:
             if s.get('is_test') or s.get('is_internal'):continue
@@ -566,6 +573,8 @@ class ProfitFunnel:
         result={'period':period,'start_msk':start.isoformat(),'end_msk_exclusive':end.isoformat(),
                 'day_not_finished':period=='today','generated_at':now.isoformat(),'ads':ads,'metrika':metric,
                 'instrumented_funnel':f,'economics':economics,'channel_attribution':channels,
+                'source_attribution':traffic_attribution.source_report(sessions,rows),
+                'funnel_slices':slices, 'wordstat_demand':demand,
                 'stock':stock,'controller_actions':actions,'technical':{'service_messages':failures,'shipment_failures':shipment_failures,
                     'verification_errors':verification_errors,'status_sync_stale':status_sync_errors,
                     'customer_communication_warnings':communication},

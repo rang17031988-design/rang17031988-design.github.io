@@ -1162,6 +1162,7 @@ class AttributionIn(BaseModel):
     utm_campaign: str | None = Field(default=None, max_length=250)
     utm_content: str | None = Field(default=None, max_length=250)
     utm_term: str | None = Field(default=None, max_length=250)
+    source_token: str | None = Field(default=None, max_length=250)
 
 class PendingOrderIn(BaseModel):
     owner_marker: str | None = Field(default=None,max_length=500)
@@ -1200,6 +1201,18 @@ async def create_pending_order(body: PendingOrderIn):
         import secrets
         token = secrets.token_hex(32)
         snapshot = body.model_dump(mode='json',exclude={'owner_marker'})
+        import traffic_attribution
+        attr=snapshot.get('attribution') or {}
+        touches=traffic_attribution.touch_fields(attr)
+        if await c.fetchval("SELECT to_regclass('public.profit_funnel_sessions') IS NOT NULL"):
+            session_attr=await c.fetchval('''SELECT attribution FROM profit_funnel_sessions
+                WHERE session_id=$1 OR checkout_session_id=$1 ORDER BY started_at ASC LIMIT 1''',str(body.session_id))
+            session_attr=_json_value(session_attr,{})
+            for field in ('source','medium','campaign','content'):
+                if 'first_'+field in session_attr:touches['first_'+field]=session_attr['first_'+field]
+            if session_attr.get('referrer_host'):attr['referrer_host']=session_attr['referrer_host']
+        touches.update(traffic_attribution.classify(attr,attr.get('referrer_host','')))
+        snapshot['attribution']=attr|touches|{'session_id':str(body.session_id)}
         snapshot.update(internal_order_token=token, pickup_title=point['point_name'],
                         pickup_address=point['point_address'], delivery_point_id=body.pickup_point_id,
                         shipment_method_ids=methods, product=PRODUCT_NAME,

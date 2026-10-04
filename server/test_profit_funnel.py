@@ -21,8 +21,9 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(device('Android Chrome'),('TABLET','Android','Chrome'))
 
     def test_channel_does_not_guess_search_vs_rsya(self):
-        self.assertEqual(channel({'utm_campaign':'715029848'}),'YANDEX_RSYA')
-        self.assertEqual(channel({'utm_campaign':'714566814'}),'YANDEX_SEARCH')
+        self.assertEqual(channel({'utm_campaign':'715029848'}),'UNKNOWN')
+        self.assertEqual(channel({'utm_campaign':'714566814'}),'UNKNOWN')
+        self.assertEqual(channel({'yclid':'123','utm_campaign':'715029848'}),'YANDEX_RSYA')
         self.assertEqual(channel({'utm_source':'yandex','utm_medium':'cpc'}),'OTHER_YANDEX_PAID')
         self.assertEqual(channel({},'google.com'),'SEO_ORGANIC')
 
@@ -40,7 +41,8 @@ class ReportingTests(unittest.TestCase):
         batch['events'][0].update(name='CONTACTS_COMPLETED',phone='+79879218327',email='private@example.com')
         batch['attribution']={'email':'private@example.com','utm_term':'private@example.com','client_id':'1234'}
         result=safe_client(batch,'Android Mobile')
-        self.assertEqual(result['attribution'],{'client_id':'1234'})
+        self.assertEqual(result['attribution']['client_id'],'1234')
+        self.assertNotIn('email',result['attribution']);self.assertNotIn('utm_term',result['attribution'])
         self.assertEqual(result['events'][0][3],{})
 
     def test_funnel_requires_ordered_pair_and_low_sample(self):

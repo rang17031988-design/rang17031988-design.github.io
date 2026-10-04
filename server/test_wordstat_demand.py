@@ -22,4 +22,5 @@ class DemandTests(unittest.TestCase):
         self.assertEqual(p['coverage_proxy'],.1);self.assertEqual(p['coverage_status'],'UNDERDELIVERY')
         self.assertNotIn('lost_impressions',p)
     def test_zero_and_negative(self):
+        self.assertEqual(normalized_history({'results':[{'date':'2026-10-01T00:00:00Z'}]}),{'2026-10-01':0})
         with self.assertRaises(ValueError):normalized_history({'results':[{'date':'2026-10-01','count':'-1'}]})

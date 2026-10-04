@@ -26,7 +26,8 @@ def normalized_history(response):
     for row in response.get('results', []):
         # Provider daily labels are calendar dates, not instants to shift to MSK.
         day = str(row.get('date', ''))[:10]
-        count = int(row['count'])
+        # Protobuf JSON omits default-valued scalar fields: omitted count is 0.
+        count = int(row.get('count', 0))
         if count < 0: raise ValueError('negative_count')
         result[day] = count
     return result
@@ -61,9 +62,9 @@ def coverage_proxy(demand, impressions, clicks, healthy):
 async def sync(controller, c, now):
     today = now.astimezone(MSK).date()
     previous = await controller.state(c, 'wordstat_demand') or {}
-    if previous.get('attempt_date') == today.isoformat(): return previous
+    if previous.get('attempt_date') == today.isoformat() and previous.get('schema_version')==1: return previous
     state = {'attempt_date': today.isoformat(), 'checked_at': now.isoformat(),
-        'state': 'WORDSTAT_DATA_DEGRADED', 'mode': 'DRY_RUN', 'clusters': [],
+        'state': 'WORDSTAT_DATA_DEGRADED', 'mode': 'DRY_RUN', 'schema_version':1, 'clusters': [],
         'max_calls_per_day': len(CLUSTERS), 'max_request_cost_rub_per_day': .16,
         'overlapping_counts_not_additive': True, 'automatic_semantic_writes': False}
     # Persist the daily attempt before external calls: no retry storm after failure.
