@@ -119,7 +119,6 @@ def attention(r):
     if estimate:lines += ['💸 Возможная недополученная выручка: ≈ '+rub(estimate['rub']),'🟡 Оценка по обычной конверсии, не фактический убыток.']
     return lines
 
-
 def video_view(v,detail=False):
     if not v:return []
     w=v['watch_seconds'];p=v['completion_percent'];a=v['after_video']
@@ -270,6 +269,25 @@ def system(r,worker):
     lines += ['💳 Оплата и 📍 ПВЗ: смотрите факты выбранного периода; отсутствие ошибок не заменяет проверку покупки.','📅 Отчёт: ежедневно в 09:00 МСК','📆 Неделя: понедельник, 09:10 МСК']
     return lines
 
+def customer_operations(r):
+    op=r.get('operational',{});delivery=op.get('delivery',[])
+    def count(statuses):return sum(x['count'] for x in delivery if x.get('ozon_status') in statuses)
+    lines=['📦 ДОСТАВКА — текущие оплаченные заказы',
+       'В пути: '+str(count(('on_way','in_courier_service'))),
+       'В ПВЗ: '+str(count(('in_delivery_point','ready_for_pickup'))),
+       'Получено: '+str(count(('delivered',))),'','✉️ УВЕДОМЛЕНИЯ']
+    for kind,label in [('paid_email','Оплата'),('ready_email','ПВЗ')]:
+        entries=[x for x in op.get('email',[]) if x['kind']==kind]
+        sent=sum(x['count'] for x in entries if x['state']=='sent')
+        delivered=sum(x['count'] for x in entries if x.get('delivery_state')=='delivered')
+        failed=sum(x['count'] for x in entries if x['state'] in ('failed','unknown') or x.get('delivery_state') in ('failed','bounced'))
+        skipped=sum(x['count'] for x in entries if x['state']=='skipped')
+        lines += [f'{label}: отправлено {sent} • доставлено {delivered} • ошибки/неясная доставка {failed}']
+        if skipped:lines.append(f'Исторические заказы исключены: {skipped}')
+    if r.get('technical',{}).get('customer_communication_warnings'):lines.append('⚠️ Есть заказы без своевременного письма клиенту.')
+    lines.append('Отправлено — принято API. Доставлено — подтверждено почтовым сервером; прочтение не подтверждается.')
+    return lines
+
 def render(r,command,worker=None):
     worker=worker or {};header=[TITLES.get(command,'📊 ПУЛЬТ ВЛАДЕЛЬЦА').upper(),period_text(r)]
     if r['day_not_finished']:header.append('⏱ День ещё не завершён')
@@ -289,11 +307,12 @@ def render(r,command,worker=None):
         lines=['📦 ЗАКАЗЫ']+[status_line(r['economics'],k) for k,v in r['economics']['statuses'].items() if v['orders']]
         if len(lines)==1:lines+=['✅ Новых заказов за этот период нет.']
         lines+=['Заказы относятся к периоду их создания.']
+        lines+=['',SEP]+customer_operations(r)
     elif command=='returns':lines=returns(r)
     elif command=='stock':
         s=r['stock'];lines=['🏪 СКЛАД',f'📦 Доступно: {number(s["estimated_units"])} шт.',f'💰 Себестоимость остатка: {rub(s["valuation_rub"])}','📦 Источник остатка: штатный склад InSales.','📦 Себестоимость: 230 ₽/шт.']
     elif command=='errors':lines=errors(r)
-    elif command=='status':lines=system(r,worker)
+    elif command=='status':lines=system(r,worker)+['',SEP]+customer_operations(r)
     else:lines=attention(r)
     return '\n'.join(header+['',SEP,'']+lines)
 

@@ -1,29 +1,43 @@
 import os, hashlib, httpx
+from html import escape
+from customer_tracking import STATUS_LABELS
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import parseaddr
 
-STATUS_LABELS = {'created':'создан','forming':'создан','ready_for_shipping':'создан',
-    'in_container':'создан','acceptance_in_progress':'передан Ozon','on_way':'доставляется',
-    'in_delivery_point':'готов к получению','in_courier_service':'доставляется',
-    'delivered':'получен','canceled':'отменён','forming_failed':'проблема',
-    'not_accepted_to_delivery':'проблема','unknown':'уточняется'}
-
-def customer_message(kind,tracking):
+def customer_message(kind,tracking,details=None):
+    details=details or {}
+    number=str(details.get('order_number',''))
+    heading=('Ваш заказ №'+number+' прибыл в пункт выдачи Ozon и готов к получению.'
+             if kind=='ready_email' else 'Оплата заказа №'+number+' прошла успешно.')
     if kind == 'ready_email':
-        return ('Здравствуйте!\n\nВаш заказ прибыл в пункт выдачи Ozon и ждёт получения.'
-                '\n\nНомер отправления:\n'+tracking+
-                '\n\nОткройте приложение Ozon → раздел «Ozon Доставка», чтобы посмотреть заказ и данные ПВЗ.'
-                '\n\nЕсли приложения Ozon нет:\nустановите его и войдите по тому же номеру телефона, '
-                'который вы указали при оформлении заказа.')
-    if kind != 'paid_email':
+        lines=['Здравствуйте!',heading]
+    elif kind == 'paid_email':
+        lines=['Здравствуйте!',heading,
+               'Количество: '+str(details.get('quantity',1))+' шт.',
+               'Оплачено: '+str(details.get('amount',''))+' ₽',
+               'Доставка в ПВЗ Ozon — бесплатно.']
+        if not tracking:lines.append('Заказ готовится к доставке. Номер отправления появится на странице отслеживания.')
+    else:
         raise ValueError('Unsupported customer email kind')
-    return ('Здравствуйте!\n\nВаш заказ успешно оплачен и передан в Ozon Доставку.'
-            '\n\nНомер отправления:\n'+tracking+
-            '\n\nКак отслеживать заказ:\n\nОткройте приложение Ozon → раздел «Ozon Доставка».'
-            '\n\nЕсли приложения Ozon нет:\nустановите приложение Ozon и войдите по тому же номеру '
-            'телефона, который вы указали при оформлении заказа.'
-            '\n\nМы также сообщим вам, когда заказ прибудет в пункт выдачи.\n\nСпасибо за заказ!')
+    if details.get('pickup_address'):lines.append('ПВЗ Ozon: '+details['pickup_address'])
+    if tracking:lines.append('Номер отслеживания: '+str(tracking))
+    if kind=='ready_email':
+        lines.append('Для получения откройте заказ в приложении Ozon под тем же номером телефона и покажите штрихкод сотруднику пункта выдачи.')
+    if details.get('tracking_url'):lines += ['Отследить заказ:',details['tracking_url'],
+       'Статус доставки можно посмотреть на сайте Посуда163 без входа в Ozon.']
+    return '\n\n'.join(lines+['Спасибо за заказ!'])
+
+def customer_email_html(kind,tracking,details):
+    text=customer_message(kind,tracking,details)
+    url=details.get('tracking_url','')
+    parts=[escape(p).replace('\n','<br>') for p in text.split('\n\n') if p!=url]
+    button=('<p><a href="'+escape(url,quote=True)+'" style="display:inline-block;background:#21835c;'
+            'color:#fff;padding:16px 25px;border-radius:9px;text-decoration:none;font-weight:700">'
+            'Отследить заказ</a></p>') if url else ''
+    return ('<!doctype html><html lang="ru"><body style="margin:0;background:#f4f5f3;font-family:Arial,sans-serif;'
+            'color:#172a20"><main style="max-width:580px;margin:24px auto;padding:26px;background:#fff;'
+            'border-radius:14px">'+''.join('<p>'+p+'</p>' for p in parts)+button+'</main></body></html>')
 
 def production_email_allowed(row):
     # Enabled only after the owner test. A cutoff excludes historical orders.
@@ -58,10 +72,14 @@ def _resend_send(message):
     # Durable worker claims protect indefinitely; provider key adds protection.
     key='posuda163-'+hashlib.sha256(str(message['Message-ID']).encode()).hexdigest()
     with httpx.Client(timeout=25,follow_redirects=False) as client:
+        body=message.get_body(preferencelist=('plain',)) if message.is_multipart() else message
+        payload={'from':_sender(),'to':[str(message['To'])],
+                'subject':str(message['Subject']),'text':body.get_content()}
+        html=message.get_body(preferencelist=('html',)) if message.is_multipart() else None
+        if html:payload['html']=html.get_content()
         response=client.post('https://api.resend.com/emails',
             headers={'Authorization':'Bearer '+os.environ['RESEND_API_KEY'],'Idempotency-Key':key},
-            json={'from':_sender(),'to':[str(message['To'])],
-                'subject':str(message['Subject']),'text':message.get_content()})
+            json=payload)
         if response.status_code in (400,401,403,404,422,429):
             raise EmailDeliveryRejected('Resend send rejected')
         if response.status_code not in (200,201):raise RuntimeError('Resend delivery unconfirmed')
@@ -69,13 +87,16 @@ def _resend_send(message):
         if not message_id:raise RuntimeError('Resend delivery unconfirmed')
         return message_id
 
-def send_customer_email(email,number,kind,tracking):
+def send_customer_email(email,number,kind,tracking,details=None):
+    details=dict(details or {},order_number=number)
     message=EmailMessage()
     message['From']=os.environ['EMAIL_FROM'];message['To']=email
     message['Subject']=('Ваш заказ прибыл в пункт выдачи Ozon' if kind=='ready_email'
-                        else 'Заказ оплачен и передан в Ozon Доставку')
-    message['Message-ID']=f'<posuda-order-{number}-{kind}@xn--163-5cdt3dgrs.xn--p1ai>'
-    message.set_content(customer_message(kind,tracking))
+                        else 'Оплата заказа прошла успешно')
+    identity=details.get('message_key',kind)
+    message['Message-ID']=f'<posuda-order-{number}-{identity}@xn--163-5cdt3dgrs.xn--p1ai>'
+    message.set_content(customer_message(kind,tracking,details))
+    message.add_alternative(customer_email_html(kind,tracking,details),subtype='html')
     return _resend_send(message)
 
 def send_resend_test():

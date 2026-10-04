@@ -8,7 +8,8 @@ from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from fastapi.responses import JSONResponse, Response
-from customer_messages import STATUS_LABELS, email_ready, send_customer_email, production_email_allowed, send_resend_test, EmailDeliveryRejected
+from customer_messages import STATUS_LABELS, email_ready, send_customer_email, production_email_allowed, send_resend_test, EmailDeliveryRejected, customer_email_html
+from customer_tracking import tracking_token, token_digest, tracking_url, public_tracking, verify_resend_event, delivery_state
 from paid_metrika import paid_conversion, conversion_csv
 from profit_controller import Controller
 from profit_funnel import ProfitFunnel
@@ -30,7 +31,7 @@ PRODUCT_LENGTH_MM = int(os.getenv("PRODUCT_LENGTH_MM", "210"))
 PRODUCT_WIDTH_MM = int(os.getenv("PRODUCT_WIDTH_MM", "50"))
 PRODUCT_HEIGHT_MM = int(os.getenv("PRODUCT_HEIGHT_MM", "50"))
 
-app = FastAPI(title="Snoved Ozon Delivery Gateway", version="1.0.0")
+app = FastAPI(title="Посуда163 Ozon Delivery Gateway", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -1107,6 +1108,19 @@ async def _payment_schema():
                 payload JSONB NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
                 attempts INT NOT NULL DEFAULT 0, upload_id TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());''')
+            await c.execute('''ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS tracking_token_hash TEXT;
+                CREATE UNIQUE INDEX IF NOT EXISTS commerce_tracking_hash_unique ON commerce_pending_orders(tracking_token_hash);
+                ALTER TABLE commerce_service_messages ADD COLUMN IF NOT EXISTS resend_message_id TEXT;
+                ALTER TABLE commerce_service_messages ADD COLUMN IF NOT EXISTS delivery_state TEXT;
+                ALTER TABLE commerce_service_messages ADD COLUMN IF NOT EXISTS error_code TEXT;
+                ALTER TABLE commerce_service_messages ADD COLUMN IF NOT EXISTS milestone TEXT;
+                ALTER TABLE commerce_service_messages ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+                ALTER TABLE commerce_service_messages ADD COLUMN IF NOT EXISTS delivery_updated_at TIMESTAMPTZ;
+                CREATE UNIQUE INDEX IF NOT EXISTS commerce_resend_message_unique ON commerce_service_messages(resend_message_id);
+                CREATE TABLE IF NOT EXISTS commerce_resend_events (
+                    event_id TEXT PRIMARY KEY,email_id TEXT NOT NULL,event_type TEXT NOT NULL,
+                    occurred_at TIMESTAMPTZ NOT NULL,received_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+                CREATE INDEX IF NOT EXISTS commerce_resend_email_idx ON commerce_resend_events(email_id);''')
         _payment_schema_ready = True
 
 class AttributionIn(BaseModel):
@@ -1253,6 +1267,8 @@ async def _register_pending_payment(payment):
                 (payment_id,order_id,order_number,quantity,amount,order_snapshot)
                 VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(payment_id) DO NOTHING''',
                 payment['id'], row['order_id'], number, row['quantity'], row['amount'], json.dumps(snapshot))
+            if payment['status']=='canceled':
+                await c.execute("UPDATE insales_yookassa_payments SET status='canceled',updated_at=NOW() WHERE payment_id=$1 AND status <> 'succeeded'",payment['id'])
             await c.execute('UPDATE commerce_pending_orders SET payment_id=$2,payment_status=$3,updated_at=NOW() WHERE internal_order_token=$1 AND (payment_id IS DISTINCT FROM $2 OR payment_status IS DISTINCT FROM $3)',
                 row['internal_order_token'], payment['id'], payment['status'])
     return True
@@ -1274,9 +1290,12 @@ async def _background_payment_reconciliation():
                     path = 'payments?limit=100' + ('&cursor=' + cursor if cursor else '')
                     data = await _yookassa_read(path, INTERNAL_KEY)
                     for payment in data.get('items', []):
-                        if native_order_number(payment) in numbers and payment.get('status') == 'succeeded' and payment.get('paid') is True:
-                            await yookassa_notification(YooNotification(type='notification',event='payment.succeeded',object={'id':payment['id']}))
-                            print('PAYMENT_RECONCILED order=' + str(native_order_number(payment)))
+                        if native_order_number(payment) in numbers:
+                            if payment.get('status') == 'succeeded' and payment.get('paid') is True:
+                                await yookassa_notification(YooNotification(type='notification',event='payment.succeeded',object={'id':payment['id']}))
+                                print('PAYMENT_RECONCILED order=' + str(native_order_number(payment)))
+                            elif payment.get('status') == 'canceled':
+                                await _register_pending_payment(payment)
                     cursor = data.get('next_cursor')
                     if not cursor:
                         break
@@ -1444,32 +1463,65 @@ async def _owner_post_purchase_alert(row, detail):
     async with db.acquire() as c:
         await c.execute("UPDATE commerce_service_messages SET state=$2,updated_at=NOW() WHERE order_id=$1 AND kind='ozon_alert'",row['order_id'],state)
 
-async def _send_queued_customer_email(row,kind):
-    if not email_ready() or not production_email_allowed(row):return
+async def _ensure_customer_tracking(row):
+    token=tracking_token(os.getenv('CUSTOMER_TRACKING_SECRET') or INTERNAL_KEY,row['internal_order_token'])
+    async with db.acquire() as c:
+        await c.execute('UPDATE commerce_pending_orders SET tracking_token_hash=$2 WHERE order_id=$1 AND tracking_token_hash IS DISTINCT FROM $2',row['order_id'],token_digest(token))
+    return tracking_url(token)
+
+async def _send_queued_customer_email(row,kind,owner_test=False):
+    snapshot=_json_value(row['snapshot'],{})
+    if owner_test:
+        if row['order_number']!=1009 or kind!='owner_pickup_preview_20261004' or snapshot.get('email','').lower()!='rang17031988@gmail.com':
+            raise ValueError('Owner preview restricted')
+    elif not production_email_allowed(row):
+        if os.getenv('CUSTOMER_EMAIL_ENABLED','').lower()=='true':
+            async with db.acquire() as c:
+                await c.execute("UPDATE commerce_service_messages SET state='skipped',error_code='historical_cutoff',updated_at=NOW() WHERE order_id=$1 AND kind=$2 AND state IN ('pending','retry')",row['order_id'],kind)
+        return
+    if not email_ready():return
+    url=await _ensure_customer_tracking(row)
     async with db.acquire() as c:
         claimed=await c.fetchval('''UPDATE commerce_service_messages SET state='claimed',attempts=attempts+1,updated_at=NOW()
             WHERE order_id=$1 AND kind=$2 AND state IN ('pending','retry') AND attempts<3 RETURNING order_id''',row['order_id'],kind)
     if not claimed:return
-    snapshot=_json_value(row['snapshot'],{})
-    state='unknown'
+    state='unknown';message_id=None;error_code=None
     try:
-        await asyncio.to_thread(send_customer_email,snapshot['email'],row['order_number'],kind,row['tracking_number'])
+        details={'quantity':row['quantity'],'amount':format(row['amount'],'.2f'),
+                 'pickup_address':snapshot.get('pickup_address',''),'tracking_url':url,'message_key':kind}
+        message_id=await asyncio.to_thread(send_customer_email,snapshot['email'],row['order_number'],
+                   'ready_email' if owner_test else kind,row.get('tracking_number'),details)
         state='sent'
     except EmailDeliveryRejected:
         # Explicit HTTP rejection means Resend did not accept the message: bounded retry is safe.
-        state='retry'
+        state='retry';error_code='provider_rejected'
     except Exception:
         # A timeout after the API request may already have delivered the email. Never resend blindly.
-        pass
+        error_code='delivery_unconfirmed'
     async with db.acquire() as c:
-        await c.execute('UPDATE commerce_service_messages SET state=$3,updated_at=NOW() WHERE order_id=$1 AND kind=$2',row['order_id'],kind,state)
+        async with c.transaction():
+            await c.execute('''UPDATE commerce_service_messages SET state=CASE WHEN $3='retry' AND attempts>=3 THEN 'failed' ELSE $3 END,resend_message_id=$4,
+                delivery_state=COALESCE(delivery_state,$5),error_code=$6,updated_at=NOW()
+                WHERE order_id=$1 AND kind=$2''',row['order_id'],kind,state,message_id,'sent' if message_id else None,error_code)
+            if message_id:await _apply_resend_delivery(c,message_id)
+
+async def _prepare_payment_ack(payment_id):
+    # Only the API-verified paid handler sets the joined payment status.
+    async with db.acquire() as c:
+        row=await c.fetchrow('''SELECT p.* FROM commerce_pending_orders p JOIN insales_yookassa_payments y
+            ON y.payment_id=p.payment_id WHERE p.payment_id=$1 AND p.payment_status='succeeded' AND y.status='succeeded' ''',payment_id)
+        if row:
+            await c.execute("INSERT INTO commerce_service_messages(order_id,kind,milestone) VALUES($1,'paid_email','payment_verified') ON CONFLICT DO NOTHING",row['order_id'])
+    if row:await _send_queued_customer_email(dict(row),'paid_email')
 
 async def _sync_post_purchase():
     async with db.acquire() as c:
-        rows=await c.fetch("SELECT * FROM commerce_pending_orders WHERE payment_status='succeeded' AND order_key IS NOT NULL")
+        rows=await c.fetch("SELECT p.* FROM commerce_pending_orders p JOIN insales_yookassa_payments y ON y.payment_id=p.payment_id WHERE p.payment_status='succeeded' AND y.status='succeeded' AND p.order_key IS NOT NULL")
     for record in rows:
         row=dict(record)
         try:
+            # Payment acknowledgement is independent of shipment creation or status reads.
+            await _prepare_payment_ack(row['payment_id'])
             if not row['shipment_id']:raise ValueError('shipment_missing')
             tracking=row['tracking_number']
             if not tracking:
@@ -1504,12 +1556,13 @@ async def _sync_post_purchase():
             elif len(statuses)==1:status=next(iter(statuses))
             else:status='on_way'
             row['tracking_number']=tracking
+            row['ozon_status']=status
             async with db.acquire() as c:
                 await c.execute('''UPDATE commerce_pending_orders SET tracking_number=$2,ozon_status=$3,
                     status_checked_at=NOW(),post_purchase_failures=0 WHERE order_id=$1''',row['order_id'],tracking,status)
                 await c.execute("INSERT INTO commerce_service_messages(order_id,kind) VALUES($1,'paid_email') ON CONFLICT DO NOTHING",row['order_id'])
-                if status=='in_delivery_point':
-                    await c.execute("INSERT INTO commerce_service_messages(order_id,kind) VALUES($1,'ready_email') ON CONFLICT DO NOTHING",row['order_id'])
+                if status in ('in_delivery_point','ready_for_pickup'):
+                    await c.execute("INSERT INTO commerce_service_messages(order_id,kind,milestone) VALUES($1,'ready_email','delivery_point') ON CONFLICT DO NOTHING",row['order_id'])
             await _process_posting_operations(row, postings)
             for kind in ('paid_email','ready_email'):
                 await _send_queued_customer_email(row,kind)
@@ -1601,11 +1654,12 @@ class CustomerStatusIn(BaseModel):
 async def customer_order_status(body: CustomerStatusIn):
     await _payment_schema()
     async with db.acquire() as c:
-        row=await c.fetchrow('''SELECT payment_status,tracking_number,ozon_status,status_checked_at
+        row=await c.fetchrow('''SELECT *
             FROM commerce_pending_orders WHERE order_key=$1''',body.order_key)
     if not row:raise HTTPException(404,'Order not found')
     paid=row['payment_status']=='succeeded'
-    return JSONResponse({'paid':paid,'tracking_number':row['tracking_number'] if paid else None,
+    url=await _ensure_customer_tracking(dict(row)) if paid else None
+    return JSONResponse({'paid':paid,'tracking_url':url,'tracking_number':row['tracking_number'] if paid else None,
         'status':row['ozon_status'] if paid else None,
         'status_label':STATUS_LABELS.get(row['ozon_status'],'уточняется') if paid else None},
         headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer'})
@@ -1618,10 +1672,11 @@ async def post_purchase_audit(x_internal_key: str | None = Header(default=None))
     async with db.acquire() as c:
         rows=await c.fetch('''SELECT order_number,tracking_number,ozon_status,status_checked_at,post_purchase_failures
             FROM commerce_pending_orders WHERE payment_status='succeeded' ''')
-        messages=await c.fetch('SELECT order_id,kind,state,attempts FROM commerce_service_messages')
+        messages=await c.fetch('SELECT order_id,kind,state,attempts,resend_message_id,delivery_state,error_code,milestone FROM commerce_service_messages')
     return {'email_transport':'resend','resend_configured':email_ready(),
         'production_email_enabled':os.getenv('CUSTOMER_EMAIL_ENABLED','').lower()=='true',
         'email_start_at':os.getenv('CUSTOMER_EMAIL_START_AT'),
+        'resend_webhook_configured':bool(os.getenv('RESEND_WEBHOOK_SECRET')),
         'orders':[dict(r) for r in rows],'messages':[dict(r) for r in messages]}
 
 @app.post('/api/internal/commerce/resend-test',include_in_schema=False)
@@ -1643,6 +1698,89 @@ async def resend_test(x_internal_key: str | None = Header(default=None)):
     async with db.acquire() as c:
         await c.execute("UPDATE commerce_service_messages SET state=$1,updated_at=NOW() WHERE order_id=-1 AND kind='resend_test_20261002'",result['state'])
     return result
+
+class CustomerTrackingIn(BaseModel):
+    token: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+@app.get('/assets/customer-tracking.js',include_in_schema=False)
+async def customer_tracking_script():
+    from pathlib import Path
+    return Response(Path(__file__).with_name('customer-tracking.js').read_text(encoding='utf8'),
+        media_type='application/javascript',headers={'Cache-Control':'public, max-age=300'})
+
+@app.post('/api/commerce/tracking',include_in_schema=False)
+async def customer_tracking_status(body: CustomerTrackingIn):
+    await _payment_schema()
+    async with db.acquire() as c:
+        row=await c.fetchrow('SELECT * FROM commerce_pending_orders WHERE tracking_token_hash=$1 AND order_key IS NOT NULL',token_digest(body.token))
+    if not row:raise HTTPException(404,'Ссылка отслеживания не найдена')
+    data=public_tracking(dict(row),_json_value(row['snapshot'],{}))
+    return JSONResponse(data,headers={'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Robots-Tag':'noindex, nofollow'})
+
+async def _apply_resend_delivery(c,email_id):
+    row=await c.fetchrow('SELECT delivery_state FROM commerce_service_messages WHERE resend_message_id=$1 FOR UPDATE',email_id)
+    if row is None:return
+    state=row['delivery_state']
+    events=await c.fetch('SELECT event_type FROM commerce_resend_events WHERE email_id=$1 ORDER BY occurred_at,received_at',email_id)
+    for event in events:state=delivery_state(state,event['event_type'])
+    await c.execute('UPDATE commerce_service_messages SET delivery_state=$2,delivery_updated_at=NOW() WHERE resend_message_id=$1',email_id,state)
+
+@app.post('/api/resend/notifications',include_in_schema=False)
+async def resend_notifications(request:Request):
+    secret=os.getenv('RESEND_WEBHOOK_SECRET','')
+    if not secret:raise HTTPException(503,'Delivery events not configured')
+    raw=bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw)>65536:raise HTTPException(413,'Event too large')
+    try:event_id,event=verify_resend_event(bytes(raw),dict(request.headers),secret)
+    except Exception:raise HTTPException(400,'Invalid signed event')
+    if event.get('type') not in ('email.sent','email.delivered','email.bounced','email.failed','email.complained'):
+        return {'ok':True,'ignored':True}
+    import re
+    email_id=event.get('data',{}).get('email_id','')
+    if not isinstance(email_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{10,120}',email_id):raise HTTPException(400,'Invalid event reference')
+    try:occurred=datetime.fromisoformat(event['created_at'].replace('Z','+00:00'))
+    except Exception:raise HTTPException(400,'Invalid event time')
+    if occurred.tzinfo is None:raise HTTPException(400,'Invalid event time')
+    await _payment_schema()
+    async with db.acquire() as c:
+        async with c.transaction():
+            inserted=await c.fetchval('''INSERT INTO commerce_resend_events(event_id,email_id,event_type,occurred_at)
+                VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING event_id''',event_id,email_id,event['type'],occurred)
+            if inserted:await _apply_resend_delivery(c,email_id)
+    return {'ok':True,'duplicate':inserted is None}
+
+async def _owner_tracking_preview_row(x_internal_key):
+    import hmac
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY,x_internal_key):raise HTTPException(403,'Forbidden')
+    await _payment_schema()
+    async with db.acquire() as c:
+        row=await c.fetchrow('SELECT * FROM commerce_pending_orders WHERE order_number=1009 AND payment_status=\'succeeded\'')
+    if not row:raise HTTPException(404,'Owner example unavailable')
+    row=dict(row);snapshot=_json_value(row['snapshot'],{})
+    if snapshot.get('email','').lower()!='rang17031988@gmail.com':raise HTTPException(409,'Owner example mismatch')
+    return row,snapshot
+
+@app.get('/api/internal/commerce/owner-tracking-preview',include_in_schema=False)
+async def owner_tracking_preview(x_internal_key:str|None=Header(default=None)):
+    row,snapshot=await _owner_tracking_preview_row(x_internal_key)
+    url=await _ensure_customer_tracking(row)
+    details={'quantity':row['quantity'],'amount':format(row['amount'],'.2f'),
+        'pickup_address':snapshot.get('pickup_address',''),'order_number':row['order_number'],'tracking_url':url}
+    return JSONResponse({'tracking_url':url,'tracking':public_tracking(row,snapshot),
+        'pickup_email_html':customer_email_html('ready_email',row.get('tracking_number'),details)},headers={'Cache-Control':'no-store'})
+
+@app.post('/api/internal/commerce/owner-pickup-test',include_in_schema=False)
+async def owner_pickup_test(x_internal_key:str|None=Header(default=None)):
+    row,snapshot=await _owner_tracking_preview_row(x_internal_key)
+    if row.get('ozon_status') not in ('in_delivery_point','ready_for_pickup'):raise HTTPException(409,'Not ready for pickup')
+    async with db.acquire() as c:
+        await c.execute("INSERT INTO commerce_service_messages(order_id,kind,milestone) VALUES($1,'owner_pickup_preview_20261004','owner_test') ON CONFLICT DO NOTHING",row['order_id'])
+    await _send_queued_customer_email(row,'owner_pickup_preview_20261004',owner_test=True)
+    async with db.acquire() as c:
+        result=await c.fetchrow("SELECT state,resend_message_id,delivery_state FROM commerce_service_messages WHERE order_id=$1 AND kind='owner_pickup_preview_20261004'",row['order_id'])
+    return dict(result)
 
 @app.post('/api/internal/yookassa/bind', include_in_schema=False)
 async def bind_native_payment(body: NativePaymentBinding, x_internal_key: str | None = Header(default=None)):
@@ -1706,6 +1844,8 @@ async def yookassa_notification(body: YooNotification, request: Request = None):
             snapshot = json.loads(row['order_snapshot']) if isinstance(row['order_snapshot'], str) else row['order_snapshot']
             amount = str(row['amount'])
     if duplicate:
+        # Queue is durable; customer email failures cannot suppress fulfillment.
+        asyncio.create_task(_prepare_payment_ack(payment_id))
         shipment = await _create_paid_ozon_shipment(payment_id)
         return {'ok': True, 'duplicate': True, 'shipment': shipment}
     message = ('✅ НОВЫЙ ОПЛАЧЕННЫЙ ЗАКАЗ\n\n'
@@ -1723,6 +1863,7 @@ async def yookassa_notification(body: YooNotification, request: Request = None):
         pass  # Never log Telegram URLs: they contain the bot credential.
     async with db.acquire() as c:
         await c.execute('UPDATE insales_yookassa_payments SET notification_state=$2,notification_message_id=$3,updated_at=NOW() WHERE payment_id=$1', payment_id, state, message_id)
+    asyncio.create_task(_prepare_payment_ack(payment_id))
     shipment = await _create_paid_ozon_shipment(payment_id)
     return {'ok': True, 'verified_paid': True, 'notification_state': state, 'shipment': shipment}
 

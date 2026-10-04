@@ -213,7 +213,6 @@ def funnel(events, sessions):
             'quality':'LOW SAMPLE' if len(groups)<20 else 'CONFIRMED'}
 
 
-
 def video_summary(groups):
     """Session cohorts and real playback snapshots; no implied sales causality."""
     counts={n:0 for n in ('cta_view','open','play','viewers_25','viewers_50','viewers_75','complete')}
@@ -474,6 +473,7 @@ class ProfitFunnel:
         async with self.pool.acquire() as c:
             await self.schema(c)
             events=[dict(x) for x in await c.fetch('SELECT * FROM profit_funnel_events WHERE occurred_at >= $1 AND occurred_at < $2 ORDER BY occurred_at',start,end)]
+            sessions=[dict(x) for x in await c.fetch('SELECT * FROM profit_funnel_sessions WHERE started_at >= $1 AND started_at < $2',start,end)]
             # A session can continue past midnight. Include sessions with real
             # events inside the requested window, retaining original attribution.
             sessions=[dict(x) for x in await c.fetch('''SELECT * FROM profit_funnel_sessions s
@@ -494,6 +494,24 @@ class ProfitFunnel:
             shipment_failures=await c.fetchval('SELECT count(*) FROM commerce_pending_orders WHERE payment_status=\'succeeded\' AND post_purchase_failures>=3')
             verification_errors=[dict(x) for x in await c.fetch('SELECT error_code,count(*) AS count FROM insales_yookassa_payments WHERE error_code IS NOT NULL AND updated_at >= $1 AND updated_at < $2 GROUP BY error_code',start,end)]
             status_sync_errors=await c.fetchval("SELECT count(*) FROM commerce_pending_orders WHERE shipment_id IS NOT NULL AND status_checked_at<NOW()-INTERVAL '10 minutes'")
+            delivery_counts=[dict(x) for x in await c.fetch("SELECT ozon_status,count(*) AS count FROM commerce_pending_orders WHERE payment_status='succeeded' GROUP BY ozon_status")]
+            email_counts=[dict(x) for x in await c.fetch("SELECT kind,state,delivery_state,count(*) AS count FROM commerce_service_messages WHERE order_id>0 AND kind IN ('paid_email','ready_email') GROUP BY kind,state,delivery_state")]
+            from customer_messages import production_email_allowed
+            communication=[]
+            communication_rows=await c.fetch('''SELECT p.order_number,p.created_at,p.ozon_status,
+                kind.value AS kind,m.state,m.delivery_state,m.created_at AS queued_at FROM commerce_pending_orders p
+                JOIN insales_yookassa_payments y ON y.payment_id=p.payment_id
+                CROSS JOIN (VALUES ('paid_email'),('ready_email')) AS kind(value)
+                LEFT JOIN commerce_service_messages m ON m.order_id=p.order_id AND m.kind=kind.value
+                WHERE p.payment_status='succeeded' AND y.status='succeeded'
+                AND (kind.value='paid_email' OR p.ozon_status IN ('in_delivery_point','ready_for_pickup'))''')
+            for message in communication_rows:
+                if not production_email_allowed(message):continue
+                if message['state']=='sent' and message['delivery_state'] not in ('bounced','failed'):continue
+                if now-(message['queued_at'] or message['created_at'])>=timedelta(minutes=10):
+                    communication.append({'order_number':message['order_number'],
+                        'kind':message['kind'] or ('ready_email' if message['ozon_status'] in ('in_delivery_point','ready_for_pickup') else 'paid_email'),
+                        'state':message['state'] or 'not_queued','delivery_state':message['delivery_state']})
         ads,metric=await asyncio.gather(self.ads(start,end),self.metrika(start,end))
         spend=sum(v['spend'] for v in ads.get('channels',{}).values())
         economics=money(rows,spend,dispositions)
@@ -517,7 +535,9 @@ class ProfitFunnel:
                 'day_not_finished':period=='today','generated_at':now.isoformat(),'ads':ads,'metrika':metric,
                 'instrumented_funnel':f,'economics':economics,'channel_attribution':channels,
                 'stock':stock,'controller_actions':actions,'technical':{'service_messages':failures,'shipment_failures':shipment_failures,
-                    'verification_errors':verification_errors,'status_sync_stale':status_sync_errors},
+                    'verification_errors':verification_errors,'status_sync_stale':status_sync_errors,
+                    'customer_communication_warnings':communication},
+                'operational':{'delivery':delivery_counts,'email':email_counts},
                 'collection_started':'profit_funnel instrumentation release; earlier missing events UNKNOWN, never zero',
                 'estimated_lost_revenue':None,'estimated_lost_revenue_reason':'requires sufficient comparable baseline'}
         async with self.pool.acquire() as c:
@@ -646,6 +666,11 @@ class ProfitFunnel:
         if r['technical']['shipment_failures']:candidates['paid-no-shipment']=('CRITICAL','⚠️ Verified PAID: повторные ошибки Ozon shipment. Проверьте existing posting, дубль не создавайте.')
         if r['technical']['status_sync_stale']:candidates['ozon-stale']=('WARNING','⚠️ Ozon status sync: есть отправления без свежей проверки более 10 минут.')
         if any(x['state']=='failed' and x['kind'].endswith('_email') for x in r['technical']['service_messages']):candidates['email-failed']=('WARNING','⚠️ Сервисное письмо по реальному заказу не отправлено. Проверьте доставку Resend; дубли автоматически не отправляйте.')
+        for warning in r['technical'].get('customer_communication_warnings',[]):
+            paid=warning['kind']=='paid_email';number=warning['order_number']
+            heading='ОПЛАТА БЕЗ ПИСЬМА КЛИЕНТУ' if paid else 'КЛИЕНТ МОЖЕТ НЕ ЗНАТЬ О ПРИБЫТИИ ЗАКАЗА'
+            text=f'⚠️ {heading}\nЗаказ: №{number}\n'+('Оплата подтверждена.' if paid else 'Статус Ozon: В ПВЗ.')+'\nEmail клиенту: не отправлен, доставка не подтверждена или зарегистрирована ошибка.\nПроверьте раздел «Заказы». Не отправляйте дубль вслепую.'
+            candidates[f'customer-email-{warning["kind"]}-{number}']=('WARNING',text)
         if sum(v for k,v in f['errors'].items() if k.endswith('/PVZ_TIMEOUT'))>=10:candidates['pvz-timeouts']=('CRITICAL','⚠️ 10+ реальных PVZ_TIMEOUT за день. Проверьте transport и сегменты устройств.')
         for key,count in f['errors'].items():
             if count>=10:candidates['errors-'+key]=('WARNING',f'⚠️ {count} технических ошибок: {key}. Проверьте сегмент, персональные поля читать не требуется.')
@@ -672,7 +697,7 @@ class ProfitFunnel:
                     VALUES($1,$2,$3,$3,'OPEN') ON CONFLICT(key) DO UPDATE SET last_seen=EXCLUDED.last_seen,status='OPEN'
                     RETURNING last_sent''',key,severity,now)
                 if not row['last_sent'] or now-row['last_sent']>=timedelta(hours=6):
-                    sent=await self.send('alert:'+key+':'+now.strftime('%Y%m%d%H'),presentation.alert_text(key,severity),presentation.keyboard('errors','today'))
+                    sent=await self.send('alert:'+key+':'+now.strftime('%Y%m%d%H'),text if key.startswith('customer-email-') else presentation.alert_text(key,severity),presentation.keyboard('errors','today'))
                     if sent:await c.execute('UPDATE profit_funnel_alerts SET last_sent=$2 WHERE key=$1',key,now)
             await c.execute("UPDATE profit_funnel_alerts SET status='RESOLVED' WHERE status='OPEN' AND NOT(key=ANY($1::text[]))",list(candidates))
 
