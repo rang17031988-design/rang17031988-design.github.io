@@ -5,9 +5,6 @@ import ydb.iam
 YDB_ENDPOINT = os.environ["YDB_ENDPOINT"]
 YDB_DATABASE = os.environ["YDB_DATABASE"]
 INTERNAL_KEY = os.getenv("INTERNAL_KEY", "")
-MAIL_FROM = os.getenv("MAIL_FROM", "orders@snoved-ai.ru")
-RETURN_EMAIL = os.getenv("RETURN_EMAIL", "rang17031988@gmail.com")
-RETURNS_URL = os.getenv("RETURNS_URL", "https://www.snoved-ai.ru/returns/")
 
 driver = ydb.Driver(
     endpoint=YDB_ENDPOINT,
@@ -74,33 +71,6 @@ def _jsonable(v):
         return v.isoformat()
     return v
 
-def _send_email(context, to_email, subject, text):
-    if not to_email or to_email.endswith(".invalid"):
-        return {"suppressed": True}
-    token = context.token
-    if isinstance(token, dict):
-        token = token.get("access_token")
-    if not token:
-        raise RuntimeError("No service-account IAM token")
-    body = {
-        "FromEmailAddress": MAIL_FROM,
-        "Destination": {"ToAddresses": [to_email]},
-        "ReplyToAddresses": [RETURN_EMAIL],
-        "Content": {"Simple": {
-            "Subject": {"Data": subject, "Charset": "UTF-8"},
-            "Body": {"Text": {"Data": text, "Charset": "UTF-8"}}
-        }}
-    }
-    req = urllib.request.Request(
-        "https://postbox.cloud.yandex.net/v2/email/outbound-emails",
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type":"application/json",
-                 "X-YaCloud-SubjectToken": token},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        return json.loads(resp.read().decode("utf-8") or "{}")
-
 def _store(data, context):
     token = str(data.get("source_token") or "")[:80]
     name = " ".join(str(data.get("full_name") or "").split())[:120]
@@ -132,27 +102,6 @@ def _store(data, context):
             "$qty":qty,"$unit":unit,"$total":total,
             "$point_name":point_name,"$point_addr":point_addr})
     row = _row(token)
-    if not row.get("order_notice_sent"):
-        text = (
-            "Спасибо!\n\n"
-            f"Мы получили данные для оформления заказа на сумму {total} ₽.\n"
-            "После получения товара надлежащего качества вы можете "
-            "отказаться от него в течение 7 дней при соблюдении "
-            "предусмотренных законом условий.\n\n"
-            f"Для оформления возврата напишите на {RETURN_EMAIL}. "
-            "Укажите номер заказа, ФИО и причину обращения.\n"
-            f"Подробные условия: {RETURNS_URL}"
-        )
-        try:
-            _send_email(context, email, "Данные заказа получены — информация о возврате", text)
-            _execute("""
-                DECLARE $token AS Utf8;
-                UPDATE customer_pii SET order_notice_sent=true,
-                    updated_at=CurrentUtcTimestamp()
-                WHERE source_token=$token;
-            """, {"$token": token})
-        except Exception:
-            pass
     return {"ok":True,"source_token":token}
 
 def _mark_delivered(data, context):
@@ -176,26 +125,6 @@ def _mark_delivered(data, context):
                 updated_at=CurrentUtcTimestamp()
             WHERE source_token=$token;
         """, {"$token": token})
-    elif not row.get("delivered_notice_sent"):
-        deadline = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
-        text = (
-            "Ваш заказ отмечен как полученный.\n\n"
-            "Для товара надлежащего качества срок отказа — 7 дней "
-            "со дня получения при соблюдении предусмотренных законом условий.\n"
-            f"Ориентировочная дата окончания этого срока: {deadline:%d.%m.%Y}.\n\n"
-            f"Для возврата напишите на {RETURN_EMAIL}. "
-            f"Подробные условия: {RETURNS_URL}"
-        )
-        try:
-            _send_email(context, row.get("email"), "Заказ получен — срок возврата", text)
-            _execute("""
-                DECLARE $token AS Utf8;
-                UPDATE customer_pii SET delivered_notice_sent=true,
-                    updated_at=CurrentUtcTimestamp()
-                WHERE source_token=$token;
-            """, {"$token": token})
-        except Exception:
-            pass
     return {"ok":True,"source_token":token,"retention_days":days}
 
 def _return_open(data):
