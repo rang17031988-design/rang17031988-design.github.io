@@ -37,9 +37,13 @@ class CPAGuards(unittest.TestCase):
         self.assertFalse(technical_paid_health({k:v for k,v in checks.items() if k!='payment_api'}))
         self.assertEqual(self.decision(economic_max=None,paid_7d=0,attribution_complete=False)[:2],('HOLD',None))
 
-    def test_prepaid_probe_can_raise_without_imagined_profit(self):
+    def test_prepaid_probe_requires_demand_and_confirmed_economics(self):
         self.assertEqual(self.decision(economic_max=None,paid_7d=0,attribution_complete=False,
-            prepaid_probe_ready=True),('SET',Decimal(125),'prepaid_delivery_probe_unknown_economics'))
+            prepaid_probe_ready=True,demand_exists=True),('HOLD',None,'economics_unknown'))
+        self.assertEqual(self.decision(paid_7d=0,prepaid_probe_ready=True,demand_exists=True),
+            ('SET',Decimal(125),'prepaid_delivery_probe'))
+        self.assertEqual(self.decision(paid_7d=0,prepaid_probe_ready=True,demand_exists=False)[2],
+            'demand_unknown_or_absent')
         self.assertEqual(self.decision(economic_max=None,paid_7d=1,prepaid_probe_ready=True)[0],'HOLD')
         self.assertEqual(self.decision(350,economic_max=None,paid_7d=0,prepaid_probe_ready=True)[0],'HOLD')
         self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,balance=110)[0],'HOLD')

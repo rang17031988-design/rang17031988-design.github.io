@@ -5,6 +5,7 @@ API contracts: official Direct Reports, KeywordBids and Campaigns services.
 No credentials or customer contact data are written to the controller tables.
 """
 import asyncio, csv, io, json, os, re
+import wordstat_demand
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -101,9 +102,11 @@ def cpa_decision(current,data,now,last_change=None):
     # Use two full healthy calendar days in the current verified CPA regime;
     # older CPC reports and an unobserved cost cannot be treated as evidence.
     if paid==0 and data.get('prepaid_probe_ready'):
+        if not data.get('demand_exists'):return 'HOLD',None,'demand_unknown_or_absent'
+        if cap is None:return 'HOLD',None,'economics_unknown'
         target=min(CPA_MAX,current+CPA_STEP)
-        if target>current and (cap is None or target<=cap) and Decimal(str(data['balance']))>=target:
-            return 'SET',target,'prepaid_delivery_probe_unknown_economics' if cap is None else 'prepaid_delivery_probe'
+        if target>current and target<=cap and Decimal(str(data['balance']))>=target:
+            return 'SET',target,'prepaid_delivery_probe'
         return 'HOLD',None,'prepaid_probe_cap_or_balance'
     if cap is None:return 'HOLD',None,'economics_unknown'
     if paid>=3 and data.get('cac_paid') is not None and Decimal(str(data['cac_paid']))>cap:
@@ -711,6 +714,11 @@ class Controller:
             await self.notify(c,'rsya-continuation-blocked','⚠️ Директ не подтвердил продолжение РСЯ №715029848 с лимитом 1 000 ₽. Бюджет не повышался; проверьте сохранённое состояние. Автопополнение выключено.')
 
     async def cpa_monitor(self,c,now):
+        try:
+            demand=await wordstat_demand.sync(self,c,now)
+        except Exception:
+            demand={'state':'WORDSTAT_DATA_DEGRADED','demand_exists':False}
+            await self.put(c,'wordstat_demand',demand)
         hour=now.replace(minute=0,second=0,microsecond=0)
         monitor=await self.state(c,'cpa_monitor') or {}
         if monitor.get('hour')==hour.isoformat():return
@@ -770,7 +778,8 @@ class Controller:
             data={'paused':pause,'strategy_verified':verified,'balance':balance,'health':technical_paid_health(checks),
                 'economic_max':economic_max,'paid_7d':paid,'clicks_7d':clicks,'cac_paid':float(spend/paid) if paid else None,
                 'observed_days':observed,'delivery_limited':impressions<100,'attribution_complete':paid>=3 and checks['paid_delivery_proven'],
-                'prepaid_probe_ready':probe['ready']}
+                'prepaid_probe_ready':probe['ready'],
+                'demand_exists':demand.get('demand_exists') is True}
             state,target,reason=cpa_decision(current,data,now,last)
             emergency=(not verified or service.get('failures',0)>=2 or (cid==715029848 and not (await self.state(c,'rsya_continuation_applied')) and spend>=Decimal(900)))
             if emergency and campaign['State']=='ON' and not unresolved and not pause:
@@ -798,6 +807,7 @@ class Controller:
                 'delivery_probe_policy_version':probe['delivery_probe_policy_version'],
                 'delivery_probe_since':probe['delivery_probe_since'],'delivery_probe_window':probe,
                 'economics_status':'UNKNOWN' if economic_max is None else 'OBSERVED',
+                'wordstat_state':demand.get('state'), 'demand_exists':data['demand_exists'],
                 'balance':float(balance) if balance is not None else None,'budget_unchanged':True}
             await self.put(c,'cpa:'+str(cid),record);summary.append(record)
         await self.put(c,'cpa_monitor',{'hour':hour.isoformat(),'campaigns':summary,'min_cpa':100,'max_cpa':350,'step':25,'cooldown_hours':24,'no_funding':True,'state':'ACTIVE' if all(x['agent_state']=='ACTIVE' for x in summary) else 'ERROR' if any(x['agent_state']=='ERROR' for x in summary) else 'PAUSED' if any(x['agent_state']=='PAUSED' for x in summary) else 'WAITING'})
