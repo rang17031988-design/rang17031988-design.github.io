@@ -4,7 +4,7 @@ Representative query counts overlap and MUST NOT be summed or interpreted as
 available advertising impressions. Missing provider days remain unknown.
 """
 import json, os
-from datetime import timedelta
+from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
 BASE = 'https://searchapi.api.cloud.yandex.net/v2/wordstat'
@@ -39,13 +39,15 @@ def demand_metrics(history, today):
         return sum(history[d] for d in days)/n if all(d in history for d in days) else None
     latest = max(history, default=None)
     yesterday = today-timedelta(days=1)
-    avg7, avg30 = sample(7, yesterday), sample(30, yesterday)
-    prior7 = sample(7, yesterday-timedelta(days=7))
+    anchor=date.fromisoformat(latest) if latest else yesterday
+    avg7, avg30 = sample(7, anchor), sample(30, anchor)
+    prior7 = sample(7, anchor-timedelta(days=7))
     a, b = history.get(yesterday.isoformat()), history.get((yesterday-timedelta(days=1)).isoformat())
     return {'wordstat_today': history.get(today.isoformat()), 'wordstat_yesterday': a,
         'avg7': avg7, 'avg30': avg30, 'trend1': (a/b-1) if a is not None and b else None,
         'trend7': (avg7/prior7-1) if avg7 is not None and prior7 else None,
-        'latest_provider_date': latest, 'complete': avg30 is not None and a is not None}
+        'latest_provider_date': latest, 'average_window_end':anchor.isoformat(),
+        'complete': avg30 is not None and a is not None}
 
 
 def coverage_proxy(demand, impressions, clicks, healthy):

@@ -10,7 +10,8 @@ class DemandTests(unittest.TestCase):
         rows={(today-timedelta(days=i)).isoformat():10 for i in range(1,36)}
         rows.pop('2026-10-03')
         m=demand_metrics(rows,today)
-        self.assertIsNone(m['wordstat_yesterday']);self.assertIsNone(m['avg7']);self.assertFalse(m['complete'])
+        self.assertIsNone(m['wordstat_yesterday']);self.assertEqual(m['avg7'],10);self.assertFalse(m['complete'])
+        self.assertEqual(m['average_window_end'],'2026-10-02')
         self.assertEqual(coverage_proxy(m,10,1,True)['coverage_status'],'UNKNOWN')
     def test_complete_average_and_growth(self):
         today=date(2026,10,4)
