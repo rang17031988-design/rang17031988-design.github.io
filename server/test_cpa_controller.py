@@ -29,8 +29,12 @@ class CPAGuards(unittest.TestCase):
     def test_empty_paid_does_not_raise(self):self.assertEqual(self.decision(paid_7d=0)[0],'HOLD')
 
     def test_first_ad_payment_not_required_for_readiness_but_scaling_stays_blocked(self):
-        self.assertTrue(technical_paid_health({'paid_dedupe_ready':True,'paid_server_enabled':True,'paid_delivery_proven':False}))
-        self.assertFalse(technical_paid_health({'paid_dedupe_ready':False,'paid_delivery_proven':True}))
+        checks={k:True for k in ('backend','landing','payment_api','checkout','pvz','metrika_goal',
+            'paid_server_enabled','paid_dedupe_ready','no_failed_paid_uploads','no_mass_errors')}
+        self.assertTrue(technical_paid_health(checks|{'paid_delivery_proven':False}))
+        self.assertFalse(technical_paid_health(checks|{'paid_dedupe_ready':False,'paid_delivery_proven':True}))
+        self.assertFalse(technical_paid_health({'paid_server_enabled':True}))
+        self.assertFalse(technical_paid_health({k:v for k,v in checks.items() if k!='payment_api'}))
         self.assertEqual(self.decision(economic_max=None,paid_7d=0,attribution_complete=False)[:2],('HOLD',None))
 
     def test_prepaid_probe_can_raise_without_imagined_profit(self):

@@ -75,7 +75,9 @@ def actual_cost_totals(rows):
             for k in ('yookassa', 'ozon', 'returns_other')}
 
 def technical_paid_health(checks):
-    return bool(checks) and all(v for k,v in checks.items() if k!='paid_delivery_proven')
+    required=('backend','landing','payment_api','checkout','pvz','metrika_goal',
+              'paid_server_enabled','paid_dedupe_ready','no_failed_paid_uploads','no_mass_errors')
+    return all(checks.get(k) is True for k in required) and all(v for k,v in checks.items() if k!='paid_delivery_proven')
 
 
 def cpa_decision(current,data,now,last_change=None):
