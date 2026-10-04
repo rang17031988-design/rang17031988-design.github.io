@@ -119,9 +119,11 @@ def safe_client(batch, ua, now=None):
         # Paths are fixed page categories, never checkout keys or URLs.
         if e.get('page') in ('home','cart','checkout','order','article','other'): p['page'] = e['page']
         events.append((eid,e['name'],at,p))
-    return {'session_id':sid,'checkout_session_id':checkout,'attribution':a,'channel':channel(a,referrer),
+    from owner_traffic import classify
+    traffic_class=classify(batch,os.getenv('PII_INTERNAL_KEY',''))
+    return {'traffic_class':traffic_class,'session_id':sid,'checkout_session_id':checkout,'attribution':a,'channel':channel(a,referrer),
             'device':device(ua[:500]),'new_visitor':bool(batch.get('new_visitor')),'events':events,
-            'is_internal':batch.get('is_internal') is True,'is_test':batch.get('is_test') is True}
+            'is_internal':traffic_class in ('owner','internal_test'),'is_test':traffic_class=='internal_test'}
 
 
 def funnel(events, sessions):
@@ -357,14 +359,19 @@ class ProfitFunnel:
         DO $$ BEGIN
           IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='commerce_pending_orders' AND column_name='is_internal') THEN
             UPDATE profit_funnel_sessions s
-            SET is_test=TRUE,is_internal=TRUE,traffic_class='owner_test'
+            SET is_test=s.is_test OR p.is_test,is_internal=TRUE,traffic_class=CASE WHEN s.is_test OR p.is_test THEN 'internal_test' ELSE 'owner' END
             FROM commerce_pending_orders p
             WHERE s.checkout_session_id=p.session_id AND (p.is_test OR p.is_internal)
-              AND (NOT s.is_test OR NOT s.is_internal OR s.traffic_class<>'owner_test');
+              AND (NOT s.is_internal OR (p.is_test AND NOT s.is_test) OR s.traffic_class NOT IN ('owner','internal_test'));
           END IF;
         END $$;
 
         ''')
+        # Preserve every old unidentified visit as UNKNOWN; never infer ownership.
+        if not await c.fetchval("SELECT EXISTS(SELECT 1 FROM profit_funnel_state WHERE key='owner_classification_v1')"):
+            await c.execute("UPDATE profit_funnel_sessions SET traffic_class='unknown' WHERE NOT is_test AND NOT is_internal AND traffic_class='customer'")
+            await c.execute("UPDATE profit_funnel_sessions SET traffic_class='internal_test' WHERE (is_test OR is_internal) AND traffic_class IN ('test','internal','owner_test')")
+            await self.put(c,'owner_classification_v1',{'migrated':True,'unknown_history_preserved':True})
         self.ready=True
 
     async def ingest(self,batch,ua):
@@ -384,9 +391,9 @@ class ProfitFunnel:
                     attribution=profit_funnel_sessions.attribution||EXCLUDED.attribution,
                     is_test=profit_funnel_sessions.is_test OR EXCLUDED.is_test,
                     is_internal=profit_funnel_sessions.is_internal OR EXCLUDED.is_internal,
-                    traffic_class=CASE WHEN EXCLUDED.is_test OR EXCLUDED.is_internal THEN EXCLUDED.traffic_class ELSE profit_funnel_sessions.traffic_class END''',
+                    traffic_class=CASE WHEN profit_funnel_sessions.is_test OR EXCLUDED.is_test THEN 'internal_test' WHEN EXCLUDED.is_internal THEN EXCLUDED.traffic_class ELSE profit_funnel_sessions.traffic_class END''',
                     clean['session_id'],clean['checkout_session_id'],kind,system,browser,clean['channel'],clean['new_visitor'],json.dumps(clean['attribution']),now,
-                    clean['is_test'],clean['is_internal'],'test' if clean['is_test'] else 'internal' if clean['is_internal'] else 'customer')
+                    clean['is_test'],clean['is_internal'],clean['traffic_class'])
                 accepted=0
                 for eid,name,at,p in clean['events']:
                     result=await c.fetchval('''INSERT INTO profit_funnel_events(event_id,session_id,name,occurred_at,payload,origin)
@@ -404,14 +411,15 @@ class ProfitFunnel:
 
     async def observe(self,c):
         """Existing verified commerce is authoritative; unknown transition times are labeled."""
-        rows=await c.fetch('''SELECT order_id,session_id,payment_id,payment_status,shipment_id,ozon_status,
-                created_at,updated_at FROM commerce_pending_orders WHERE order_id IS NOT NULL''')
+        rows=await c.fetch('''SELECT p.order_id,p.session_id,p.payment_id,p.payment_status,p.shipment_id,p.ozon_status,
+                p.created_at,p.updated_at,(y.status='succeeded') AS verified_paid FROM commerce_pending_orders p
+                LEFT JOIN insales_yookassa_payments y ON y.payment_id=p.payment_id WHERE p.order_id IS NOT NULL''')
         initialized=bool(await self.state(c,'lifecycle_initialized'))
         for r in rows:
             sid=await c.fetchval('SELECT session_id FROM profit_funnel_sessions WHERE checkout_session_id=$1 ORDER BY last_seen DESC LIMIT 1',r['session_id'])
             names=[]
             if r['payment_id']:names.append('PAYMENT_STARTED')
-            if r['payment_status']=='succeeded':names += ['PAYMENT_SUCCESS','ORDER_PAID']
+            if r['payment_status']=='succeeded' and r['verified_paid']:names += ['PAYMENT_SUCCESS','ORDER_PAID']
             if r['payment_status']=='canceled':names += ['PAYMENT_FAILED']
             if r['shipment_id']:names += ['OZON_SHIPMENT_CREATED']
             if r['ozon_status'] in ('on_way','in_courier_service'):names += ['OZON_IN_TRANSIT']
@@ -542,6 +550,7 @@ class ProfitFunnel:
         f=funnel(events,sessions)
         channels={}
         for s in sessions:
+            if s.get('is_test') or s.get('is_internal'):continue
             entry=channels.setdefault(s['channel'],{'sessions':0,'paid':0,'orders':0})
             entry['sessions']+=1
         for r in rows:
@@ -561,6 +570,7 @@ class ProfitFunnel:
                     'verification_errors':verification_errors,'status_sync_stale':status_sync_errors,
                     'customer_communication_warnings':communication},
                 'operational':{'delivery':delivery_counts,'email':email_counts},'cpa_controller':cpa,
+                'traffic_exclusions':{'owner':sum(s.get('traffic_class')=='owner' for s in sessions),'internal_test':sum(s.get('traffic_class')=='internal_test' for s in sessions),'unknown':sum(s.get('traffic_class')=='unknown' for s in sessions)},
                 'collection_started':'profit_funnel instrumentation release; earlier missing events UNKNOWN, never zero',
                 'estimated_lost_revenue':None,'estimated_lost_revenue_reason':'requires sufficient comparable baseline'}
         async with self.pool.acquire() as c:

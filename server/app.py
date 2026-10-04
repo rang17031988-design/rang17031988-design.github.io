@@ -586,6 +586,29 @@ async def controller_audit(preview: bool = False, x_internal_key: str | None = H
             'states': [dict(r) for r in states], 'actions': [dict(r) for r in counts],
             'weekly_preview': report}
 
+@app.post('/api/internal/commerce/cpa-refresh', include_in_schema=False)
+async def cpa_refresh(x_internal_key: str | None = Header(default=None)):
+    _operations_access(x_internal_key)
+    if not _profit_controller:raise HTTPException(503,'Controller unavailable')
+    from profit_controller import LOCK
+    async with db.acquire() as c:
+        if not await c.fetchval('SELECT pg_try_advisory_lock($1)',LOCK):raise HTTPException(409,'Controller busy')
+        try:
+            await _profit_controller.put(c,'cpa_monitor',{})
+            await _profit_controller.cpa_monitor(c,datetime.now(timezone.utc))
+            return await _profit_controller.state(c,'cpa_monitor')
+        finally:await c.fetchval('SELECT pg_advisory_unlock($1)',LOCK)
+
+@app.get('/api/internal/commerce/paid-dedupe-audit', include_in_schema=False)
+async def paid_dedupe_audit(x_internal_key: str | None = Header(default=None)):
+    _operations_access(x_internal_key)
+    async with db.acquire() as c:
+        indexes=await c.fetch("SELECT tablename,indexdef FROM pg_indexes WHERE schemaname='public' AND tablename IN ('commerce_paid_conversions','profit_funnel_events') AND indexdef LIKE 'CREATE UNIQUE INDEX%'")
+        states=await c.fetch('SELECT state,count(*) AS count FROM commerce_paid_conversions GROUP BY state')
+        duplicates=await c.fetchval("SELECT count(*) FROM (SELECT order_id FROM commerce_paid_conversions GROUP BY order_id HAVING count(*)>1 UNION ALL SELECT NULL FROM commerce_paid_conversions GROUP BY payment_id HAVING count(*)>1) x")
+        return {'unique_indexes':[dict(x) for x in indexes],'duplicates':duplicates,'queue_states':[dict(x) for x in states],
+                'verified_only':True,'browser_paid_disabled':True,'unknown_uploads_never_retried':True}
+
 @app.post('/api/analytics/events', include_in_schema=False)
 async def analytics_events(request: Request):
     if not _funnel_worker:
@@ -1141,6 +1164,7 @@ class AttributionIn(BaseModel):
     utm_term: str | None = Field(default=None, max_length=250)
 
 class PendingOrderIn(BaseModel):
+    owner_marker: str | None = Field(default=None,max_length=500)
     session_id: uuid.UUID
     attribution: AttributionIn | None = None
     quantity: int = Field(ge=1, le=10000)
@@ -1175,7 +1199,7 @@ async def create_pending_order(body: PendingOrderIn):
             raise HTTPException(422, 'Ozon shipment method unavailable')
         import secrets
         token = secrets.token_hex(32)
-        snapshot = body.model_dump(mode='json')
+        snapshot = body.model_dump(mode='json',exclude={'owner_marker'})
         snapshot.update(internal_order_token=token, pickup_title=point['point_name'],
                         pickup_address=point['point_address'], delivery_point_id=body.pickup_point_id,
                         shipment_method_ids=methods, product=PRODUCT_NAME,
@@ -1184,8 +1208,11 @@ async def create_pending_order(body: PendingOrderIn):
             (internal_order_token,session_id,quantity,amount,snapshot,shipment_idempotency_key)
             VALUES($1,$2,$3,$4,$5::jsonb,$6)''', token, str(body.session_id), body.quantity,
             Decimal(body.quantity)*unit_price, json.dumps(snapshot), str(uuid.uuid4()))
+        from owner_traffic import valid
+        if valid(body.owner_marker,os.getenv('PII_INTERNAL_KEY',''),'owner'):
+            await c.execute("UPDATE commerce_pending_orders SET is_internal=TRUE,traffic_class='owner' WHERE internal_order_token=$1",token)
         if body.email.lower()=='rang17031988@gmail.com':
-            await c.execute("UPDATE commerce_pending_orders SET is_test=TRUE,is_internal=TRUE,traffic_class='owner_test' WHERE internal_order_token=$1",token)
+            await c.execute("UPDATE commerce_pending_orders SET is_test=TRUE,is_internal=TRUE,traffic_class='internal_test' WHERE internal_order_token=$1",token)
     return {'ok': True, 'internal_order_token': token, 'amount': body.quantity*unit_price,
             'pickup_address': snapshot['pickup_address']}
 

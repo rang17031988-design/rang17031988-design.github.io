@@ -61,7 +61,7 @@ def sales(r):
 
 def advertising(r,detail=False):
     a=r['ads'];lines=['📣 РЕКЛАМА']
-    if a.get('quality')!='CONFIRMED':return lines+[UNKNOWN]
+    if a.get('quality')!='CONFIRMED' and not detail:return lines+[UNKNOWN]
     channels=a.get('channels',{});imps=sum(v['impressions'] for v in channels.values());clicks=sum(v['clicks'] for v in channels.values());spend=sum(v['spend'] for v in channels.values())
     if not detail:
         lines += [f'👁 Показы: {number(imps)}',f'👆 Клики: {number(clicks)}',f'💸 Расход: {rub(spend)}',f'💰 Средний клик: {rub(spend/clicks if clicks else None)}']
@@ -75,6 +75,17 @@ def advertising(r,detail=False):
             lines += [f'📦 Связанные заказы: {number(attributed["orders"])}',f'💳 Связанные оплаты: {number(attributed["paid"])}',f'🎯 Стоимость связанной оплаты: {rub(attributed["cac"])}']
         else:lines.append('🏷 Связь клика с оплатой: пока нет данных')
     if detail:
+        monitor=r.get('cpa_controller',{})
+        lines += ['', '🤖 CPA AGENT: '+monitor.get('state','UNKNOWN')]
+        for v in monitor.get('campaigns',[]):
+            lines += [v.get('channel','')+': '+v.get('agent_state','UNKNOWN'),
+                      'Статус кампании: '+str(v.get('campaign_state','UNKNOWN')),
+                      'Целевой CPA: '+rub(v.get('current_cpa')),
+                      'VERIFIED оплаты (7д): '+number(v.get('paid_7d')),
+                      'CAC PAID (7д): '+rub(v.get('cac_paid')),
+                      'Последнее решение: '+v.get('reason','UNKNOWN'),
+                      'Проверено: '+str(v.get('checked_at','UNKNOWN')),
+                      'Выборка: '+v.get('sample','UNKNOWN')]
         actions=r.get('controller_actions',[])
         def count(names):return sum(v['count'] for v in actions if v['action'] in names and v['state'] in ('applied','success','succeeded'))
         lines += ['', '🤖 КОНТРОЛЛЕР СТАВОК',f'🔧 Изменил ставки: {count(("set",))}',

@@ -178,6 +178,17 @@ def handler(event, context):
     if event.get('httpMethod')=='POST' and (event.get('queryStringParameters') or {}).get('action')=='pvz_trace':
         import pvz_transport
         return pvz_transport.client_trace(event)
+    if event.get('httpMethod')=='POST' and (event.get('queryStringParameters') or {}).get('action')=='owner_marker':
+        import owner_traffic,analytics_inbox
+        headers={str(k).lower():str(v) for k,v in (event.get('headers') or {}).items()}
+        if headers.get('origin')!=analytics_inbox.ORIGIN:return analytics_inbox.response(403,{'ok':False})
+        try:
+            raw=event.get('body') or '{}'
+            if event.get('isBase64Encoded'):raw=base64.b64decode(raw).decode()
+            data=json.loads(raw)
+            if not owner_traffic.valid(data.get('activation'),INTERNAL_KEY,'activate'):return analytics_inbox.response(403,{'ok':False})
+            return analytics_inbox.response(200,{'marker':owner_traffic.mint(INTERNAL_KEY,'owner'),'max_age':owner_traffic.MARKER_TTL})
+        except (ValueError,TypeError):return analytics_inbox.response(400,{'ok':False})
     if event.get('httpMethod')=='POST' and (event.get('queryStringParameters') or {}).get('action')=='analytics':
         import analytics_inbox
         return analytics_inbox.ingest(event,_execute)

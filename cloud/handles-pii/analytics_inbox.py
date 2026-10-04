@@ -21,7 +21,7 @@ def ingest(event,execute):
         if event.get('isBase64Encoded'):raw=base64.b64decode(raw).decode('utf-8')
         if len(raw)>16000:return response(413,{'ok':False})
         data=json.loads(raw);sid=str(uuid.UUID(data['session_id']));bid=str(uuid.UUID(data['batch_id']))
-        allowed_top={'session_id','checkout_session_id','attribution','referrer_host','new_visitor','events','batch_id','is_test','is_internal'}
+        allowed_top={'session_id','checkout_session_id','attribution','referrer_host','new_visitor','events','batch_id','is_test','is_internal','owner_marker'}
         if set(data)-allowed_top:raise ValueError()
         if len(data.get('events',[]))>30:raise ValueError()
         for e in data.get('events',[]):
