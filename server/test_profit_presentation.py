@@ -8,7 +8,7 @@ import profit_presentation as ui
 class PresentationTests(unittest.TestCase):
     def test_all_menu_routes_are_small_valid_callbacks(self):
         buttons=[b for row in ui.keyboard()['inline_keyboard'] for b in row]
-        self.assertEqual(len(buttons),14)
+        self.assertEqual(len(buttons),15)
         self.assertEqual({b['callback_data'].split(':')[1] for b in buttons},{c for c,_ in ui.MENU})
         for b in buttons:self.assertLessEqual(len(b['callback_data'].encode()),64)
         self.assertNotIn('debug',str(buttons))

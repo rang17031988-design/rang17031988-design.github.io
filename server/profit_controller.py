@@ -13,6 +13,9 @@ CAMPAIGN = 714566814
 MOSCOW = ZoneInfo('Europe/Moscow')
 MIN_BID, MAX_BID, STEP = Decimal('10'), Decimal('20'), Decimal('.5')
 LOCK = 714566814
+CPA_CAMPAIGNS={714566814:'Search',715029848:'Network'}
+CPA_MIN,CPA_MAX,CPA_STEP=Decimal(100),Decimal(350),Decimal(25)
+PAID_GOAL=666936854
 COGS_UNIT_RUB = 230  # Handle, packaging, handling and labor included; owner confirmed.
 
 
@@ -70,6 +73,31 @@ def actual_cost_totals(rows):
     paid = [r for r in rows if r['payment_status'] == 'succeeded']
     return {k: sum(float(r[k]) for r in paid) if all(r.get(k) is not None for r in paid) else None
             for k in ('yookassa', 'ozon', 'returns_other')}
+
+def cpa_decision(current,data,now,last_change=None):
+    """Only observed verified sales and complete economics justify scaling."""
+    current=Decimal(str(current))
+    if not CPA_MIN<=current<=CPA_MAX:return 'REVIEW',None,'outside_owner_range'
+    if data.get('paused'):return 'PAUSED',None,'owner_pause'
+    if not data.get('strategy_verified'):return 'BLOCKED',None,'paid_strategy_or_goal_changed'
+    if data.get('balance') is None:return 'BLOCKED',None,'balance_unknown'
+    if Decimal(str(data['balance']))<current:return 'WAITING_FOR_FUNDS',None,'no_automatic_funding'
+    if not data.get('health'):return 'BLOCKED_FUNNEL',None,'health_or_attribution_unverified'
+    if last_change and now-last_change<timedelta(hours=24):return 'HOLD',None,'24h_cooldown'
+    cap=data.get('economic_max')
+    if cap is None:return 'HOLD',None,'economics_unknown'
+    cap=min(CPA_MAX,Decimal(str(cap)))
+    if cap<CPA_MIN:return 'SUSPEND',None,'economic_cap_below_minimum'
+    if current>cap:return 'SUSPEND',None,'economic_cap_below_current'
+    paid=data.get('paid_7d',0);clicks=data.get('clicks_7d',0)
+    if clicks>=30 and paid==0:return 'HOLD',None,'traffic_without_verified_payments'
+    if paid>=3 and data.get('cac_paid') is not None and Decimal(str(data['cac_paid']))>cap:
+        return ('SET',max(CPA_MIN,current-CPA_STEP),'cac_above_margin') if current>CPA_MIN else ('SUSPEND',None,'cac_above_margin_at_minimum')
+    if data.get('observed_days',0)>=2 and data.get('delivery_limited') and paid>=3 and data.get('attribution_complete'):
+        target=min(CPA_MAX,current+CPA_STEP)
+        if current<target<=cap:return 'SET',target,'verified_profitable_volume_limited'
+    if data.get('lower_cpa_preserves_paid') and paid>=3 and current>CPA_MIN:return 'SET',current-CPA_STEP,'lower_cost_preserves_verified_paid'
+    return 'HOLD',None,'insufficient_scaling_evidence'
 
 
 def economics(rows, ad_spend, clicks, impressions, costs):
@@ -159,6 +187,15 @@ class Controller:
                 return_number TEXT PRIMARY KEY,order_id BIGINT NOT NULL,
                 return_type TEXT NOT NULL,status TEXT NOT NULL,
                 checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+            CREATE TABLE IF NOT EXISTS profit_cpa_actions (
+                id BIGSERIAL PRIMARY KEY,campaign_id BIGINT NOT NULL,action TEXT NOT NULL,
+                reason TEXT NOT NULL,before_cpa NUMERIC,after_cpa NUMERIC,state TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),updated_at TIMESTAMPTZ DEFAULT NOW());
+            ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+            ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT FALSE;
+            ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS traffic_class TEXT NOT NULL DEFAULT 'customer';
+            UPDATE commerce_pending_orders SET is_test=TRUE,is_internal=TRUE,traffic_class='owner_test'
+                WHERE order_number IN (1008,1009,1010,1011,1012) AND traffic_class='customer';
         ''')
 
     async def state(self, c, key):
@@ -183,12 +220,12 @@ class Controller:
         if 'result' not in body: raise DirectError('invalid_result')
         return body['result']
 
-    async def report(self, start, end, query=False):
+    async def report(self, start, end, query=False,campaign_id=CAMPAIGN):
         fields = ['Date','CampaignId','AdGroupId','AdId','CriterionId','Criterion','Impressions','Clicks','Cost']
         if query: fields.append('Query')
         spec = {'SelectionCriteria': {'DateFrom': start.isoformat(), 'DateTo': end.isoformat(),
-                    'Filter': [{'Field':'CampaignId','Operator':'EQUALS','Values':[str(CAMPAIGN)]}]},
-                'FieldNames': fields, 'ReportName': f'posuda-{start}-{end}-' + ('queries' if query else 'keywords'),
+                    'Filter': [{'Field':'CampaignId','Operator':'EQUALS','Values':[str(campaign_id)]}]},
+                'FieldNames': fields, 'ReportName': f'posuda-{campaign_id}-{start}-{end}-' + ('queries' if query else 'keywords'),
                 'ReportType': 'SEARCH_QUERY_PERFORMANCE_REPORT' if query else 'CUSTOM_REPORT',
                 'DateRangeType': 'CUSTOM_DATE', 'Format': 'TSV', 'IncludeVAT': 'YES', 'IncludeDiscount': 'YES'}
         headers = {**self.headers(), 'processingMode':'auto', 'returnMoneyInMicros':'false',
@@ -204,7 +241,7 @@ class Controller:
         for row in rows:
             row['Cost'] = float(Decimal(row['Cost']))
             row['Clicks'], row['Impressions'] = int(row['Clicks']), int(row['Impressions'])
-            if int(row['CampaignId']) != CAMPAIGN: raise DirectError('campaign_mismatch')
+            if int(row['CampaignId']) != campaign_id: raise DirectError('campaign_mismatch')
         return rows
 
     async def notify(self, c, key, text):
@@ -382,7 +419,8 @@ class Controller:
             EXISTS(SELECT 1 FROM profit_controller_returns r WHERE r.order_id=p.order_id
                 AND r.return_type='client_return' AND r.status<>'received') AS return_pending
             FROM commerce_pending_orders p LEFT JOIN profit_controller_costs k USING(order_id)
-            WHERE p.order_id IS NOT NULL AND p.created_at >= $1 AND p.created_at < $2''',start,end)]
+            WHERE p.order_id IS NOT NULL AND NOT p.is_test AND NOT p.is_internal
+            AND p.created_at >= $1 AND p.created_at < $2''',start,end)]
 
     async def metrika(self, start, end):
         token = os.getenv('METRIKA_OAUTH_TOKEN')
@@ -556,6 +594,119 @@ class Controller:
             return {'preview':True,'notification_sent':False,'message':message,'economics':e,'stock':stock}
         await self.notify(c,key,message)
 
+    async def cpa_balance(self):
+        response=await self.http.post('https://api.direct.yandex.ru/live/v4/json/',json={
+            'method':'AccountManagement','token':os.environ['YANDEX_DIRECT_TOKEN'],
+            'param':{'Action':'Get','SelectionCriteria':{'Logins':['rang1703']}}})
+        if response.status_code!=200:return None
+        accounts=response.json().get('data',{}).get('Accounts',[])
+        row=next((a for a in accounts if a.get('Login')=='rang1703' and a.get('Currency')=='RUB'),None)
+        return Decimal(str(row['Amount'])) if row else None
+
+    async def cpa_write(self,c,campaign,action,reason,target=None):
+        import copy
+        cid=campaign['Id'];side=CPA_CAMPAIGNS[cid]
+        strategy=copy.deepcopy(campaign['UnifiedCampaign']['BiddingStrategy'])
+        current=Decimal(str(strategy.get(side,{}).get('PayForConversion',{}).get('Cpa',0)))/1000000
+        if action=='SET':
+            if target is None or not CPA_MIN<=target<=CPA_MAX or abs(target-current)>CPA_STEP:
+                raise ValueError('CPA bounds')
+            strategy[side]['PayForConversion']['Cpa']=int(target*1000000)
+        aid=await c.fetchval('''INSERT INTO profit_cpa_actions(campaign_id,action,reason,before_cpa,after_cpa,state)
+            VALUES($1,$2,$3,$4,$5,$6) RETURNING id''',cid,action,reason,current,target,'prepared' if self.writes else 'dry_run')
+        if not self.writes:return False
+        try:
+            params={'Campaigns':[{'Id':cid,'UnifiedCampaign':{'BiddingStrategy':strategy}}]} if action=='SET' else {'SelectionCriteria':{'Ids':[cid]}}
+            result=await self.api('campaigns','update' if action=='SET' else 'suspend',params)
+            items=result.get('UpdateResults' if action=='SET' else 'SuspendResults',[])
+            if len(items)!=1 or items[0].get('Id')!=cid or items[0].get('Errors'):raise DirectError('cpa_write_rejected')
+            checked=await self.api('campaigns','get',{'SelectionCriteria':{'Ids':[cid]},'FieldNames':['Id','State'],'UnifiedCampaignFieldNames':['BiddingStrategy','CounterIds']})
+            saved=checked['Campaigns'][0]
+            if action=='SET' and saved['UnifiedCampaign']['BiddingStrategy']!=strategy:raise DirectError('cpa_readback_mismatch')
+            if action=='SUSPEND' and saved['State']!='SUSPENDED':raise DirectError('suspend_readback_mismatch')
+        except Exception:
+            await c.execute("UPDATE profit_cpa_actions SET state='unknown',updated_at=NOW() WHERE id=$1",aid)
+            raise
+        await c.execute("UPDATE profit_cpa_actions SET state='applied',updated_at=NOW() WHERE id=$1",aid)
+        return True
+
+    async def cpa_monitor(self,c,now):
+        hour=now.replace(minute=0,second=0,microsecond=0)
+        monitor=await self.state(c,'cpa_monitor') or {}
+        if monitor.get('hour')==hour.isoformat():return
+        campaigns=(await self.api('campaigns','get',{'SelectionCriteria':{'Ids':list(CPA_CAMPAIGNS)},
+            'FieldNames':['Id','State','Status','EndDate'],'UnifiedCampaignFieldNames':['BiddingStrategy','CounterIds']}))['Campaigns']
+        if {x['Id'] for x in campaigns}!=set(CPA_CAMPAIGNS):raise DirectError('cpa_campaigns_missing')
+        balance=await self.cpa_balance()
+        service=await self.state(c,'service_checks') or {}
+        checks=dict(service.get('checks',{}))
+        try:
+            checkout=await self.http.get('https://xn--163-5cdt3dgrs.xn--p1ai/gocheckout',follow_redirects=True)
+            checks['checkout']=checkout.status_code==200 and ('checkout' in checkout.text.lower())
+            pvz=await self.http.get('https://ozon-delivery-gateway-production.up.railway.app/api/ozon/points',params={'city':'Самара','limit':1})
+            checks['pvz']=pvz.status_code==200 and bool(pvz.json().get('points'))
+            metrika=await self.http.get('https://api-metrika.yandex.net/management/v1/counter/112544007/goals',headers={'Authorization':'OAuth '+os.getenv('METRIKA_OAUTH_TOKEN','')})
+            checks['metrika_goal']=metrika.status_code==200 and any(g.get('id')==PAID_GOAL for g in metrika.json().get('goals',[]))
+        except Exception:checks['external_health']=False
+        checks['paid_server_enabled']=os.getenv('METRIKA_PAID_ENABLED','').lower()=='true'
+        checks['paid_delivery_proven']=bool(await c.fetchval("SELECT EXISTS(SELECT 1 FROM commerce_paid_conversions m JOIN commerce_pending_orders p USING(order_id) WHERE m.state='processed' AND NOT p.is_test AND NOT p.is_internal)"))
+        checks['no_failed_paid_uploads']=not await c.fetchval("SELECT EXISTS(SELECT 1 FROM commerce_paid_conversions WHERE state IN ('linkage_failure','unknown','failed'))")
+        checks['no_mass_errors']=not await c.fetchval("SELECT count(*)>=10 FROM profit_funnel_events WHERE occurred_at>NOW()-INTERVAL '1 hour' AND name IN ('JS_ERROR','PAYMENT_ERROR','PVZ_TIMEOUT')")
+        today=now.astimezone(MOSCOW).date();start=today-timedelta(days=6)
+        pause=bool(await self.state(c,'cpa_owner_paused'))
+        summary=[]
+        for campaign in campaigns:
+            cid=campaign['Id'];side=CPA_CAMPAIGNS[cid];opposite='Network' if side=='Search' else 'Search'
+            strategy=campaign['UnifiedCampaign']['BiddingStrategy'];pay=strategy.get(side,{}).get('PayForConversion',{})
+            current=Decimal(str(pay.get('Cpa',0)))/1000000
+            verified=(strategy.get(side,{}).get('BiddingStrategyType')=='PAY_FOR_CONVERSION' and pay.get('GoalId')==PAID_GOAL
+                and strategy.get(opposite,{}).get('BiddingStrategyType')=='SERVING_OFF'
+                and campaign['UnifiedCampaign'].get('CounterIds',{}).get('Items')==[112544007])
+            last=await c.fetchval("SELECT max(created_at) FROM profit_cpa_actions WHERE campaign_id=$1 AND state='applied' AND action='SET'",cid)
+            unresolved=await c.fetchval("SELECT EXISTS(SELECT 1 FROM profit_cpa_actions WHERE campaign_id=$1 AND state IN ('prepared','unknown'))",cid)
+            stats=await self.report(start,today,campaign_id=cid)
+            spend=sum(Decimal(str(x['Cost'])) for x in stats);clicks=sum(x['Clicks'] for x in stats);impressions=sum(x['Impressions'] for x in stats)
+            rows=await c.fetch('''SELECT p.amount,p.quantity,p.created_at,k.yookassa,k.ozon,k.returns_other,p.ozon_status
+                FROM commerce_pending_orders p JOIN insales_yookassa_payments y ON y.payment_id=p.payment_id
+                LEFT JOIN profit_controller_costs k ON k.order_id=p.order_id
+                WHERE p.payment_status='succeeded' AND y.status='succeeded' AND NOT p.is_test AND NOT p.is_internal
+                AND p.created_at >= $1 AND p.snapshot->'attribution'->>'utm_campaign'=$2''',datetime.combine(start,datetime.min.time(),MOSCOW),str(cid))
+            paid=len(rows);paid24=sum(r['created_at']>=now-timedelta(hours=24) for r in rows)
+            # No estimated transport or unobserved returns/write-offs become zero.
+            economic_max=None
+            risk=await self.state(c,'confirmed_return_writeoff_risk')
+            if risk and risk.get('source') and risk.get('rub_per_order') is not None and len(rows)>=10 and all(r['ozon_status']=='delivered' and all(r[k] is not None for k in ('yookassa','ozon','returns_other')) for r in rows):
+                margins=[Decimal(str(r['amount']))*Decimal('.94')-r['quantity']*COGS_UNIT_RUB-sum(Decimal(str(r[k])) for k in ('yookassa','ozon','returns_other')) for r in rows]
+                economic_max=max(Decimal(0),min(margins)-Decimal(str(risk['rub_per_order'])))
+            previous=await self.state(c,'cpa:'+str(cid)) or {}
+            first=previous.get('first_observed_at',now.isoformat());observed=(now-datetime.fromisoformat(first)).total_seconds()/86400
+            data={'paused':pause,'strategy_verified':verified,'balance':balance,'health':bool(checks) and all(checks.values()),
+                'economic_max':economic_max,'paid_7d':paid,'clicks_7d':clicks,'cac_paid':float(spend/paid) if paid else None,
+                'observed_days':observed,'delivery_limited':impressions<100,'attribution_complete':paid>=3}
+            state,target,reason=cpa_decision(current,data,now,last)
+            emergency=(not verified or service.get('failures',0)>=2 or (cid==715029848 and spend>=Decimal(900)))
+            if emergency and campaign['State']=='ON' and not unresolved and not pause:
+                if await self.cpa_write(c,campaign,'SUSPEND','paid_strategy_health_or_period_budget_guard'):
+                    state,target,reason='STOPPED',None,'emergency_guard'
+                    await self.notify(c,'cpa-emergency-'+str(cid)+'-'+today.isoformat(),
+                        '⚠️ Кампания '+str(cid)+' остановлена: проверка PAID-стратегии, работоспособности или лимита теста не прошла. Автоматического возобновления нет.')
+            if unresolved:state,target,reason='BLOCKED',None,'ambiguous_previous_write'
+            if campaign['State']!='ON':state,target,reason='HOLD',None,'campaign_not_running_no_auto_resume'
+            if campaign.get('EndDate') and today.isoformat()>campaign['EndDate']:state,target,reason='STOPPED',None,'authorized_period_ended'
+            evaluated=previous.get('evaluated_at');due=not evaluated or now-datetime.fromisoformat(evaluated)>=timedelta(hours=6)
+            if due and state in ('SET','SUSPEND'):
+                if await self.cpa_write(c,campaign,state,reason,target):
+                    if target is not None:current=target
+                    last=now
+            record={'campaign_id':cid,'channel':'Поиск' if side=='Search' else 'РСЯ','current_cpa':float(current),
+                'paid_24h':paid24,'paid_7d':paid,'spend_7d':float(spend),'cac_paid':data['cac_paid'],'state':state,
+                'reason':reason,'last_change':last.isoformat() if last else None,'checked_at':now.isoformat(),
+                'evaluated_at':now.isoformat() if due else evaluated,'first_observed_at':first,
+                'economic_max':float(economic_max) if economic_max is not None else None,'health_checks':checks,
+                'balance':float(balance) if balance is not None else None,'budget_unchanged':True}
+            await self.put(c,'cpa:'+str(cid),record);summary.append(record)
+        await self.put(c,'cpa_monitor',{'hour':hour.isoformat(),'campaigns':summary,'min_cpa':100,'max_cpa':350,'step':25,'cooldown_hours':24,'no_funding':True})
+
     async def loop(self):
         while True:
             try:
@@ -573,13 +724,14 @@ class Controller:
                             paused = await self.guard(c,campaigns[0],sum(r['Cost'] for r in daily),now)
                             service_bad = await self.service_guard(c,campaigns[0],now)
                             paused = paused or service_bad
-                            await self.hourly(c,now,paused)
+                            await self.cpa_monitor(c,now)
                             if not (os.getenv('PROFIT_FUNNEL_ENABLED','').lower()=='true' and os.getenv('PROFIT_FUNNEL_BOT_TOKEN')):
                                 await self.weekly(c,now)
                             await self.daily_shipments(c,now)
-                            self.status={'state':'running','checked_at':now.isoformat(),'live_writes':self.writes,'campaign':CAMPAIGN,
-                                         'min_bid_rub':float(MIN_BID),'max_bid_rub':float(MAX_BID),
-                                         'daily_spend_cap_rub':10000,'ordinary_cooldown_hours':2}
+                            self.status={'state':'running','checked_at':now.isoformat(),'live_writes':self.writes,
+                                         'campaigns':list(CPA_CAMPAIGNS),'mode':'VERIFIED_PAID_CPA',
+                                         'min_cpa_rub':100,'max_cpa_rub':350,'step_rub':25,
+                                         'daily_spend_cap_rub':10000,'ordinary_cooldown_hours':24}
                             await self.put(c,'health',self.status)
                         finally:
                             await c.fetchval('SELECT pg_advisory_unlock($1)',LOCK)

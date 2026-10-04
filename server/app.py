@@ -1109,6 +1109,9 @@ async def _payment_schema():
                 attempts INT NOT NULL DEFAULT 0, upload_id TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());''')
             await c.execute('''ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS tracking_token_hash TEXT;
+                ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT FALSE;
+                ALTER TABLE commerce_pending_orders ADD COLUMN IF NOT EXISTS traffic_class TEXT NOT NULL DEFAULT 'customer';
                 CREATE UNIQUE INDEX IF NOT EXISTS commerce_tracking_hash_unique ON commerce_pending_orders(tracking_token_hash);
                 ALTER TABLE commerce_service_messages ADD COLUMN IF NOT EXISTS resend_message_id TEXT;
                 ALTER TABLE commerce_service_messages ADD COLUMN IF NOT EXISTS delivery_state TEXT;
@@ -1176,6 +1179,8 @@ async def create_pending_order(body: PendingOrderIn):
             (internal_order_token,session_id,quantity,amount,snapshot,shipment_idempotency_key)
             VALUES($1,$2,$3,$4,$5::jsonb,$6)''', token, str(body.session_id), body.quantity,
             Decimal(body.quantity)*unit_price, json.dumps(snapshot), str(uuid.uuid4()))
+        if body.email.lower()=='rang17031988@gmail.com':
+            await c.execute("UPDATE commerce_pending_orders SET is_test=TRUE,is_internal=TRUE,traffic_class='owner_test' WHERE internal_order_token=$1",token)
     return {'ok': True, 'internal_order_token': token, 'amount': body.quantity*unit_price,
             'pickup_address': snapshot['pickup_address']}
 
@@ -1319,6 +1324,7 @@ async def _sync_paid_metrika():
         rows = await c.fetch('''SELECT p.* FROM commerce_pending_orders p
             LEFT JOIN commerce_paid_conversions m ON m.order_id=p.order_id
             WHERE p.payment_status='succeeded' AND p.order_id IS NOT NULL
+            AND NOT p.is_test AND NOT p.is_internal
             AND p.order_key IS NOT NULL AND m.order_id IS NULL
             AND (coalesce(p.snapshot->'attribution'->>'client_id','')<>''
                  OR coalesce(p.snapshot->'attribution'->>'yclid','')<>'')''')
@@ -1516,6 +1522,9 @@ async def _prepare_payment_ack(payment_id):
 
 async def _sync_post_purchase():
     async with db.acquire() as c:
+        # An interrupted send cannot stay claimed forever. Ambiguous delivery is
+        # surfaced for verification, never blindly resent after the provider window.
+        await c.execute("UPDATE commerce_service_messages SET state='unknown',error_code='worker_interrupted',updated_at=NOW() WHERE state='claimed' AND kind LIKE '%email' AND updated_at<NOW()-INTERVAL '30 minutes'")
         rows=await c.fetch("SELECT p.* FROM commerce_pending_orders p JOIN insales_yookassa_payments y ON y.payment_id=p.payment_id WHERE p.payment_status='succeeded' AND y.status='succeeded' AND p.order_key IS NOT NULL")
     for record in rows:
         row=dict(record)
@@ -1887,5 +1896,5 @@ async def payment_fulfillment_audit(x_internal_key: str | None = Header(default=
     if not db:
         raise HTTPException(503, 'Database is not configured')
     async with db.acquire() as c:
-        row = await c.fetchrow("SELECT count(*) AS fulfillment_rows, count(*) FILTER (WHERE ozon_order_id IS NOT NULL) AS ozon_orders_created, count(*) FILTER (WHERE payment_status='PAID') AS paid_fulfillment_rows FROM order_fulfillment")
-    return dict(row)
+        row = await c.fetchrow("SELECT count(*) AS fulfillment_rows, count(*) FILTER (WHERE shipment_id IS NOT NULL) AS ozon_orders_created, count(*) FILTER (WHERE payment_status='succeeded') AS paid_fulfillment_rows FROM commerce_pending_orders WHERE order_id IS NOT NULL")
+    return dict(row)|{'source':'commerce_pending_orders','legacy_table_deprecated':True}

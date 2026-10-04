@@ -11,7 +11,7 @@ MENU=[('today','📊 Сегодня'),('yesterday','📅 Вчера'),('week','�
       ('funnel','🧭 Воронка'),('profit','💰 Прибыль'),('ads','📣 Реклама'),
       ('devices','📱 Устройства'),('browsers','🌐 Браузеры'),('speed','⚡ Скорость'),
       ('orders','📦 Заказы'),('returns','↩️ Возвраты'),('stock','🏪 Склад'),
-      ('errors','🛠 Ошибки'),('status','❤️ Система')]
+      ('errors','🛠 Ошибки'),('status','❤️ Система'),('cpa','🤖 CPA-контроллер')]
 TITLES=dict(MENU)|{'menu':'📊 ПУЛЬТ ВЛАДЕЛЬЦА','behavior':'⏱ Поведение','attention':'🎯 Требует внимания'}
 STAGES={'SITE_SESSION':'👥 Посетили сайт','PRODUCT_VIEW':'👁 Посмотрели товар',
         'BUY_BUTTON_CLICK':'🛒 Нажали «Купить»','CHECKOUT_OPEN':'📝 Открыли оформление',
@@ -313,6 +313,16 @@ def render(r,command,worker=None):
         s=r['stock'];lines=['🏪 СКЛАД',f'📦 Доступно: {number(s["estimated_units"])} шт.',f'💰 Себестоимость остатка: {rub(s["valuation_rub"])}','📦 Источник остатка: штатный склад InSales.','📦 Себестоимость: 230 ₽/шт.']
     elif command=='errors':lines=errors(r)
     elif command=='status':lines=system(r,worker)+['',SEP]+customer_operations(r)
+    elif command=='cpa':
+        monitor=r.get('cpa_controller',{});lines=['🤖 CPA-КОНТРОЛЛЕР','Границы: 100–350 ₽ • шаг 25 ₽','Проверка: 1 час • решение: 6 часов • изменение: 24 часа','Пополнение и изменение бюджетов запрещены.']
+        for x in monitor.get('campaigns',[]):
+            lines+=['',SEP,x['channel'], 'Текущий CPA: '+rub(x['current_cpa']),
+                    'Оплаты 24ч / 7д: '+str(x['paid_24h'])+' / '+str(x['paid_7d']),
+                    'Расход 7д: '+rub(x['spend_7d']),'CAC PAID: '+rub(x['cac_paid']),
+                    'Статус: '+x['state'],'Причина: '+x['reason'],
+                    'Последнее изменение: '+(x.get('last_change') or 'не было'),
+                    'Экономический предел: '+rub(x.get('economic_max'))]
+        if not monitor.get('campaigns'):lines.append('Ожидается следующая проверка Railway.')
     else:lines=attention(r)
     return '\n'.join(header+['',SEP,'']+lines)
 
@@ -339,6 +349,7 @@ def keyboard(command='menu',period='today',page=0,total=1):
         for group in [('funnel','profit'),('ads','devices'),('orders','errors')]:rows.append([button(c) for c in group])
         if command=='week':rows.append([button('attention'),button('speed')])
     elif command=='funnel':rows.append([button('behavior'),button('devices')])
+    elif command=='cpa':rows.append([button('cpa_pause','PAUSE CPA AGENT'),button('cpa_resume','RESUME CPA AGENT')])
     if command!='menu':rows.append([button('menu','☰ Все разделы')])
     return {'inline_keyboard':rows}
 

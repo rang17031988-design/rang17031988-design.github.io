@@ -22,7 +22,7 @@ import profit_presentation as presentation
 
 MSK = ZoneInfo('Europe/Moscow')
 UTC = timezone.utc
-COMMANDS = 'today yesterday week funnel devices browsers speed ads profit orders returns stock errors status'.split()
+COMMANDS = 'today yesterday week funnel devices browsers speed ads profit orders returns stock errors status cpa cpa_pause cpa_resume'.split()
 CLIENT_EVENTS = set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
 STAGES = 'SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_LOADED PVZ_SELECTED PAYMENT_STARTED PAYMENT_SUCCESS ORDER_RECEIVED'.split()
 ATTR_KEYS = 'yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()
@@ -120,12 +120,14 @@ def safe_client(batch, ua, now=None):
         if e.get('page') in ('home','cart','checkout','order','article','other'): p['page'] = e['page']
         events.append((eid,e['name'],at,p))
     return {'session_id':sid,'checkout_session_id':checkout,'attribution':a,'channel':channel(a,referrer),
-            'device':device(ua[:500]),'new_visitor':bool(batch.get('new_visitor')),'events':events}
+            'device':device(ua[:500]),'new_visitor':bool(batch.get('new_visitor')),'events':events,
+            'is_internal':batch.get('is_internal') is True,'is_test':batch.get('is_test') is True}
 
 
 def funnel(events, sessions):
     groups = {}
     for s in sessions:
+        if s.get('is_test') or s.get('is_internal'):continue
         s = dict(s)
         groups[s['session_id']] = {'session':s,'events':{},'all':[]}
     for e in events:
@@ -348,6 +350,9 @@ class ProfitFunnel:
             not_picked_up BOOLEAN,return_logistics NUMERIC,extra_cost NUMERIC NOT NULL DEFAULT 0,
             confirmed_at TIMESTAMPTZ,source TEXT NOT NULL);
         ALTER TABLE profit_funnel_return_dispositions ADD COLUMN IF NOT EXISTS refund_rub NUMERIC;
+        ALTER TABLE profit_funnel_sessions ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE profit_funnel_sessions ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE profit_funnel_sessions ADD COLUMN IF NOT EXISTS traffic_class TEXT NOT NULL DEFAULT 'customer';
         ''')
         self.ready=True
 
@@ -360,11 +365,17 @@ class ProfitFunnel:
                 count=await c.fetchval("SELECT count(*) FROM profit_funnel_events WHERE session_id=$1 AND observed_at>NOW()-INTERVAL '1 minute'",clean['session_id'])
                 if count>100:return {'accepted':0,'limited':True}
                 now=datetime.now(UTC);kind,system,browser=clean['device']
-                await c.execute('''INSERT INTO profit_funnel_sessions VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$9)
+                await c.execute('''INSERT INTO profit_funnel_sessions
+                    (session_id,checkout_session_id,device_type,os,browser,channel,new_visitor,attribution,started_at,last_seen,is_test,is_internal,traffic_class)
+                    VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$9,$10,$11,$12)
                     ON CONFLICT(session_id) DO UPDATE SET last_seen=GREATEST(profit_funnel_sessions.last_seen,EXCLUDED.last_seen),
                     checkout_session_id=coalesce(EXCLUDED.checkout_session_id,profit_funnel_sessions.checkout_session_id),
-                    attribution=profit_funnel_sessions.attribution||EXCLUDED.attribution''',
-                    clean['session_id'],clean['checkout_session_id'],kind,system,browser,clean['channel'],clean['new_visitor'],json.dumps(clean['attribution']),now)
+                    attribution=profit_funnel_sessions.attribution||EXCLUDED.attribution,
+                    is_test=profit_funnel_sessions.is_test OR EXCLUDED.is_test,
+                    is_internal=profit_funnel_sessions.is_internal OR EXCLUDED.is_internal,
+                    traffic_class=CASE WHEN EXCLUDED.is_test OR EXCLUDED.is_internal THEN EXCLUDED.traffic_class ELSE profit_funnel_sessions.traffic_class END''',
+                    clean['session_id'],clean['checkout_session_id'],kind,system,browser,clean['channel'],clean['new_visitor'],json.dumps(clean['attribution']),now,
+                    clean['is_test'],clean['is_internal'],'test' if clean['is_test'] else 'internal' if clean['is_internal'] else 'customer')
                 accepted=0
                 for eid,name,at,p in clean['events']:
                     result=await c.fetchval('''INSERT INTO profit_funnel_events(event_id,session_id,name,occurred_at,payload,origin)
@@ -486,6 +497,7 @@ class ProfitFunnel:
             for ret in returns:
                 dispositions.setdefault(ret['order_id'],{})['has_return']=True
             stock=await self.controller.stock(c,now)
+            cpa=await self.controller.state(c,'cpa_monitor') or {}
             # Physical inspection alone may mark a returned item resellable/damaged.
             stock['confirmed_resellable_return_units']=sum(r['quantity'] for r in rows if dispositions.get(r['order_id'],{}).get('condition')=='resellable')
             # Native stock already includes its real stock events; never deduct PAID or add returns twice.
@@ -537,7 +549,7 @@ class ProfitFunnel:
                 'stock':stock,'controller_actions':actions,'technical':{'service_messages':failures,'shipment_failures':shipment_failures,
                     'verification_errors':verification_errors,'status_sync_stale':status_sync_errors,
                     'customer_communication_warnings':communication},
-                'operational':{'delivery':delivery_counts,'email':email_counts},
+                'operational':{'delivery':delivery_counts,'email':email_counts},'cpa_controller':cpa,
                 'collection_started':'profit_funnel instrumentation release; earlier missing events UNKNOWN, never zero',
                 'estimated_lost_revenue':None,'estimated_lost_revenue_reason':'requires sufficient comparable baseline'}
         async with self.pool.acquire() as c:
@@ -646,9 +658,19 @@ class ProfitFunnel:
                         command,period,page=parts[1],parts[2],min(int(parts[3]),50)
                 else:
                     command=((update['message'].get('text') or '').split(' ')[0].split('@')[0]).lstrip('/')
+                    phrase=(update['message'].get('text') or '').strip().upper()
+                    if phrase=='PAUSE CPA AGENT':command='cpa_pause'
+                    if phrase=='RESUME CPA AGENT':command='cpa_resume'
                     if command in ('start','menu'):command='menu'
                     if command in ('today','yesterday','week'):period=command
                 if command in COMMANDS+['menu','behavior','attention','debug','debug_last']:
+                    if command in ('cpa_pause','cpa_resume'):
+                        async with self.pool.acquire() as c:
+                            await self.controller.put(c,'cpa_owner_paused',command=='cpa_pause')
+                            await self.controller.put(c,'cpa_monitor',{})
+                        await self.send('command:'+str(update['update_id']),
+                            '🤖 CPA Agent приостановлен владельцем.' if command=='cpa_pause' else '🤖 CPA Agent возобновлён. Проверки, границы 100–350 ₽ и cooldown сохранены. Остановленные рекламные кампании автоматически не запускаются.')
+                        continue
                     if period not in reports:reports[period]=await self.report(period)
                     r=reports[period]
                     if command in ('debug','debug_last'):
@@ -706,6 +728,7 @@ class ProfitFunnel:
             try:
                 async with self.pool.acquire() as leader:
                     await self.schema(leader)
+                    await leader.execute("UPDATE profit_funnel_outbox SET state='delivery_unknown',error_code='worker_interrupted',updated_at=NOW() WHERE state='claimed' AND updated_at<NOW()-INTERVAL '15 minutes'")
                     locked=await leader.fetchval('SELECT pg_try_advisory_lock($1)',LOCK)
                     if locked:
                         try:
