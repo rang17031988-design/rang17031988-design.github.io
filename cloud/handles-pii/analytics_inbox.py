@@ -4,6 +4,8 @@ from urllib.parse import urlsplit
 
 ORIGIN='https://xn--163-5cdt3dgrs.xn--p1ai'
 CLIENT_EVENTS=set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
+ATTR_KEYS=set('yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword referrer_host'.split())
+ATTR_KEYS.update(f'{side}_{field}' for side in ('first','last') for field in ('source','medium','campaign','content','term','yclid','referrer_host'))
 
 def ensure(execute):
     execute('''CREATE TABLE IF NOT EXISTS analytics_inbox(
@@ -28,7 +30,7 @@ def ingest(event,execute):
             uuid.UUID(e['event_id'])
             if e['name'] not in CLIENT_EVENTS:raise ValueError()
             if set(e)-{'event_id','name','timestamp','elapsed_ms','duration_sec','value','metric','error_code','page','video_view_id','video_watch_seconds','video_duration_seconds','video_completion_percent'}:raise ValueError()
-        if set(data.get('attribution') or {})-set('yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()):raise ValueError()
+        if set(data.get('attribution') or {})-ATTR_KEYS:raise ValueError()
         for e in data.get('events',[]):
             for key in ('elapsed_ms','duration_sec','value'):
                 if key in e:
@@ -47,6 +49,8 @@ def ingest(event,execute):
         attr={}
         for k,v in (data.get('attribution') or {}).items():
             v=str(v)[:200]
+            if k in ('yclid','client_id','first_yclid','last_yclid') and not re.fullmatch(r'\d{1,100}',v):continue
+            if k.endswith('referrer_host') and not re.fullmatch(r'[a-zA-Z0-9.-]{1,120}',v):continue
             if '@' not in v and not re.search(r'(?:secret|password|bearer|token=|\+?7[0-9]{10})',v,re.I):attr[k]=v
         data['attribution']=attr
         data['referrer_host']=urlsplit('https://'+str(data.get('referrer_host',''))).hostname or ''
