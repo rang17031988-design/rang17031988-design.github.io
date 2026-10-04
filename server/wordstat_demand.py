@@ -64,7 +64,13 @@ def coverage_proxy(demand, impressions, clicks, healthy):
 async def sync(controller, c, now):
     today = now.astimezone(MSK).date()
     previous = await controller.state(c, 'wordstat_demand') or {}
-    if previous.get('attempt_date') == today.isoformat() and previous.get('schema_version')==1: return previous
+    if previous.get('attempt_date') == today.isoformat() and previous.get('schema_version')==1:
+        if any('average_window_end' not in x for x in previous.get('clusters',[])):
+            for cluster in previous['clusters']:
+                rows=await c.fetch('SELECT observed_date,query_count FROM profit_wordstat_history WHERE cluster_id=$1',cluster['cluster_id'])
+                cluster.update(demand_metrics({str(x['observed_date']):x['query_count'] for x in rows},today))
+            await controller.put(c,'wordstat_demand',previous)
+        return previous
     state = {'attempt_date': today.isoformat(), 'checked_at': now.isoformat(),
         'state': 'WORDSTAT_DATA_DEGRADED', 'mode': 'DRY_RUN', 'schema_version':1, 'clusters': [],
         'max_calls_per_day': len(CLUSTERS), 'max_request_cost_rub_per_day': .16,
