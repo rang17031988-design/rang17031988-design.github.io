@@ -324,6 +324,7 @@ class ProfitFunnel:
     async def schema(self,c):
         if self.ready:return
         await c.execute('''
+        SELECT pg_advisory_xact_lock(714566816);
         CREATE TABLE IF NOT EXISTS profit_funnel_sessions (
             session_id TEXT PRIMARY KEY,checkout_session_id TEXT,device_type TEXT NOT NULL,
             os TEXT NOT NULL,browser TEXT NOT NULL,channel TEXT NOT NULL,new_visitor BOOLEAN NOT NULL,
@@ -353,6 +354,16 @@ class ProfitFunnel:
         ALTER TABLE profit_funnel_sessions ADD COLUMN IF NOT EXISTS is_test BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE profit_funnel_sessions ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT FALSE;
         ALTER TABLE profit_funnel_sessions ADD COLUMN IF NOT EXISTS traffic_class TEXT NOT NULL DEFAULT 'customer';
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='commerce_pending_orders' AND column_name='is_internal') THEN
+            UPDATE profit_funnel_sessions s
+            SET is_test=TRUE,is_internal=TRUE,traffic_class='owner_test'
+            FROM commerce_pending_orders p
+            WHERE s.checkout_session_id=p.session_id AND (p.is_test OR p.is_internal)
+              AND (NOT s.is_test OR NOT s.is_internal OR s.traffic_class<>'owner_test');
+          END IF;
+        END $$;
+
         ''')
         self.ready=True
 

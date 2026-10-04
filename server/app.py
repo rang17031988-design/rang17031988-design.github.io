@@ -644,9 +644,14 @@ async def analytics_audit(x_internal_key: str | None = Header(default=None)):
         await _funnel_worker.schema(c)
         event_counts=await c.fetch('SELECT name,origin,count(*) AS count FROM profit_funnel_events GROUP BY name,origin')
         messages=await c.fetch('SELECT key,state,error_code,telegram_message_id FROM profit_funnel_outbox ORDER BY created_at DESC LIMIT 30')
+        classes=await c.fetch('SELECT traffic_class,is_test,is_internal,count(*) AS count FROM profit_funnel_sessions GROUP BY traffic_class,is_test,is_internal')
+        pvz=await c.fetch("SELECT e.event_id,e.occurred_at,e.origin,COALESCE(s.is_test,FALSE) AS is_test,COALESCE(s.is_internal,FALSE) AS is_internal FROM profit_funnel_events e LEFT JOIN profit_funnel_sessions s ON e.session_id=s.session_id WHERE e.name='PVZ_SELECTED' ORDER BY e.occurred_at DESC LIMIT 10")
+
         tables=await c.fetch("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('commerce_pending_orders','profit_controller_costs','profit_funnel_events')")
     return {'worker':_funnel_worker.status,'events':[dict(r) for r in event_counts],
             'outbox':[dict(r) for r in messages],'source_columns':[dict(r) for r in tables],
+            'traffic_classes':[dict(r) for r in classes],
+            'recent_pvz_selected':[dict(r) for r in pvz],
             'bot_configured':bool(os.getenv('PROFIT_FUNNEL_BOT_TOKEN')),'owner_only':True}
 
 @app.get("/health")
