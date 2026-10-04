@@ -49,9 +49,12 @@ def ingest(event,execute):
         attr={}
         for k,v in (data.get('attribution') or {}).items():
             v=str(v)[:200]
-            if k in ('yclid','client_id','first_yclid','last_yclid') and not re.fullmatch(r'\d{1,100}',v):continue
+            numeric_id=k in ('yclid','client_id','first_yclid','last_yclid')
+            if numeric_id and not re.fullmatch(r'\d{1,100}',v):continue
             if k.endswith('referrer_host') and not re.fullmatch(r'[a-zA-Z0-9.-]{1,120}',v):continue
-            if '@' not in v and not re.search(r'(?:secret|password|bearer|token=|\+?7[0-9]{10})',v,re.I):attr[k]=v
+            # Valid yclid/ClientID are numeric identifiers, not contact fields.
+            # A phone-like substring inside a long real identifier must not erase attribution.
+            if numeric_id or '@' not in v and not re.search(r'(?:secret|password|bearer|token=|\+?7[0-9]{10})',v,re.I):attr[k]=v
         data['attribution']=attr
         data['referrer_host']=urlsplit('https://'+str(data.get('referrer_host',''))).hostname or ''
         if '@' in data['referrer_host']:data['referrer_host']=''
