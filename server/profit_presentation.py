@@ -80,6 +80,19 @@ def advertising(r,detail=False):
             'Режим: '+demand.get('mode','UNKNOWN'),
             'Кластеры: '+number(len(demand.get('clusters',[]))),
             'Это сигнал спроса, не число доступных показов Direct.']
+        for cluster in demand.get('clusters', []):
+            joined = cluster.get('joined')
+            if not joined: continue
+            lines += [cluster.get('cluster_name', cluster['cluster_id'])+':',
+                'Спрос ср. 7д: '+number(cluster.get('avg7'))+' • показы: '+number(joined.get('impressions')),
+                'Клики: '+number(joined.get('clicks'))+' • PAID: '+number(joined.get('verified_paid')),
+                'CAC PAID: '+rub(joined.get('cac_paid_rub'))+' • выручка: '+rub(joined.get('revenue_rub')),
+                'Coverage proxy: '+str(cluster.get('coverage_proxy') if cluster.get('coverage_proxy') is not None else UNKNOWN),
+                'Score: '+number(cluster.get('opportunity_score'))+' • '+cluster.get('confidence','UNKNOWN')]
+        if demand.get('joined_at'):
+            lines += ['Связка проверена: '+demand['joined_at'],
+                'Органические сессии без известного запроса: '+number(demand.get('joined_unassigned',{}).get('organic_sessions')),
+                'Неполные периоды, неизвестные расходы и малая выборка не дают оснований для повышения CPA.']
         monitor=r.get('cpa_controller',{})
         lines += ['', '🤖 CPA AGENT: '+monitor.get('state','UNKNOWN')]
         for v in monitor.get('campaigns',[]):

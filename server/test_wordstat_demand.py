@@ -1,6 +1,6 @@
 import unittest
-from datetime import date,timedelta
-from wordstat_demand import normalized_history,demand_metrics,coverage_proxy
+from datetime import date,timedelta,datetime,timezone
+from wordstat_demand import normalized_history,demand_metrics,coverage_proxy,cluster_for_term,joined_metrics
 
 class DemandTests(unittest.TestCase):
     def test_provider_labels_are_not_timezone_shifted(self):
@@ -25,3 +25,34 @@ class DemandTests(unittest.TestCase):
     def test_zero_and_negative(self):
         self.assertEqual(normalized_history({'results':[{'date':'2026-10-01T00:00:00Z'}]}),{'2026-10-01':0})
         with self.assertRaises(ValueError):normalized_history({'results':[{'date':'2026-10-01','count':'-1'}]})
+
+    def test_exclusive_cluster_and_unknown_query(self):
+        self.assertEqual(cluster_for_term('купить универсальную ручку'),'universal')
+        self.assertEqual(cluster_for_term('сменная ручка сковороды'),'replacement')
+        self.assertEqual(cluster_for_term('купить чапельник'),'chapelnik')
+        self.assertIsNone(cluster_for_term('сковорода'))
+
+    def test_join_dedupe_paid_evidence_and_unknown_costs(self):
+        demand={'clusters':[{'cluster_id':'buy','complete':True,'avg7':100,'average_window_end':'2026-10-03'}]}
+        a={'utm_source':'yandex','utm_medium':'cpc','utm_campaign':'714566814','utm_term':'купить ручку'}
+        sessions=[{'attribution':a},{'attribution':a,'is_internal':True},
+            {'attribution':{'utm_source':'google','utm_medium':'organic'}}]
+        order={'order_id':5,'payment_status':'succeeded','amount':1200,'quantity':1,'attribution':a}
+        rows=[order,dict(order),{**order,'order_id':6,'payment_status':'pending'},
+            {**order,'order_id':7,'attribution':{'utm_campaign':'714566814','utm_term':'купить ручку'}}]
+        result=joined_metrics(demand,[{'Criterion':'купить ручку','Clicks':4,'Impressions':10,'Cost':25}],sessions,rows,
+            datetime(2026,9,27,tzinfo=timezone.utc),datetime(2026,10,4,tzinfo=timezone.utc),True)
+        item=result['clusters'][0]['joined']
+        self.assertEqual(item['verified_paid'],1);self.assertEqual(item['revenue_rub'],1200)
+        self.assertEqual(item['paid_sessions'],1);self.assertEqual(item['cac_paid_rub'],25)
+        self.assertIsNone(item['contribution_before_ads_rub']);self.assertIsNone(item['organic_sessions'])
+        self.assertEqual(result['joined_unassigned']['organic_sessions'],1)
+        self.assertIsNone(result['clusters'][0]['opportunity_score'])
+        self.assertEqual(result['mode'],'DRY_RUN')
+        self.assertNotIn('joined',demand['clusters'][0])
+
+    def test_mismatched_period_withholds_coverage(self):
+        result=joined_metrics({'clusters':[{'cluster_id':'buy','complete':True,'avg7':100,'average_window_end':'2026-10-01'}]},[],[],[],
+            datetime(2026,9,29,tzinfo=timezone.utc),datetime(2026,10,5,tzinfo=timezone.utc),True)
+        self.assertEqual(result['clusters'][0]['coverage_status'],'UNKNOWN')
+        self.assertIn('fresh_aligned_demand_window',result['clusters'][0]['missing_score_inputs'])

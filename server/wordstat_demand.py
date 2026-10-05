@@ -3,7 +3,7 @@
 Representative query counts overlap and MUST NOT be summed or interpreted as
 available advertising impressions. Missing provider days remain unknown.
 """
-import json, os
+import json, os, re, copy
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -59,6 +59,87 @@ def coverage_proxy(demand, impressions, clicks, healthy):
     return {'coverage_proxy': round(proxy, 4) if proxy is not None else None,
         'coverage_status': 'UNDERDELIVERY' if avg and impressions < 100 and clicks < 10 else 'OBSERVED',
         'interpretation': 'DEMAND COVERAGE PROXY; overlapping searches are not Direct inventory'}
+
+
+def cluster_for_term(term):
+    """Exclusive representative intent, never infer a query from a landing visit."""
+    term = re.sub(r'[^а-яa-z0-9 ]', ' ', str(term or '').lower().replace('ё', 'е'))
+    for cid, pattern in (('chapelnik', r'чапельник'), ('holder', r'сковорододержател'),
+            ('ukhvat', r'ухват'), ('broken', r'слом|полом'), ('lost', r'потер'),
+            ('replacement', r'сменн|запасн|замен'), ('universal', r'универсальн')):
+        if re.search(pattern, term): return cid
+    if re.search(r'куп(ить|лю|и)|покуп', term) and re.search(r'ручк', term): return 'buy'
+    return None
+
+
+def joined_metrics(demand, direct, sessions, orders, start, end, healthy=False):
+    """Join an explicit observed window. This function cannot write ads or goals.
+
+    Organic search terms are unavailable in our privacy-limited instrumentation;
+    keep those sessions unassigned instead of inventing a cluster or conversion.
+    """
+    import traffic_attribution
+    result = copy.deepcopy(demand)
+    totals = {cid: {'impressions': 0, 'clicks': 0, 'spend_rub': 0.,
+        'paid_sessions': 0, 'verified_paid': 0, 'revenue_rub': 0., 'margins': []} for cid, *_ in CLUSTERS}
+    unassigned = {'direct_clicks': 0, 'paid_sessions': 0, 'organic_sessions': 0, 'verified_paid': 0}
+    def attr(row):
+        a = row.get('attribution') or {}
+        return json.loads(a) if isinstance(a, str) else a
+    for row in direct:
+        cid = cluster_for_term(row.get('Criterion'))
+        if not cid:
+            unassigned['direct_clicks'] += row['Clicks']; continue
+        item = totals[cid]
+        for dest, key in (('impressions','Impressions'), ('clicks','Clicks'), ('spend_rub','Cost')):
+            item[dest] += row[key]
+    for row in sessions:
+        if row.get('is_test') or row.get('is_internal') or row.get('traffic_class','customer') != 'customer': continue
+        a = attr(row); source = traffic_attribution.classify(a, a.get('referrer_host',''))
+        if source['primary_attribution'] == 'ORGANIC_SEARCH': unassigned['organic_sessions'] += 1
+        if source['primary_attribution'] != 'PAID_SEARCH': continue
+        cid = cluster_for_term(a.get('utm_term'))
+        if cid: totals[cid]['paid_sessions'] += 1
+        else: unassigned['paid_sessions'] += 1
+    seen = set()
+    for row in orders:
+        oid = row.get('order_id')
+        if oid is None or oid in seen or row.get('is_test') or row.get('is_internal') or row.get('payment_status') != 'succeeded': continue
+        seen.add(oid); a = attr(row)
+        if traffic_attribution.classify(a, a.get('referrer_host',''))['primary_attribution'] != 'PAID_SEARCH': continue
+        cid = cluster_for_term(a.get('utm_term'))
+        if not cid: unassigned['verified_paid'] += 1; continue
+        item = totals[cid]; item['verified_paid'] += 1; item['revenue_rub'] += float(row['amount'])
+        margin = None
+        if row.get('ozon_status') == 'delivered' and not row.get('return_pending') and not row.get('return_received') and all(row.get(k) is not None for k in ('yookassa','ozon','returns_other')):
+            margin = float(row['amount'])*.94 - row['quantity']*230 - sum(float(row[k]) for k in ('yookassa','ozon','returns_other'))
+        item['margins'].append(margin)
+    for cluster in result.get('clusters', []):
+        item = totals[cluster['cluster_id']]; margins = item.pop('margins')
+        paid, visits = item['verified_paid'], item['paid_sessions']
+        item.update(paid_cr=paid/visits if visits else None, cac_paid_rub=item['spend_rub']/paid if paid else None,
+            contribution_before_ads_rub=sum(margins) if margins and all(x is not None for x in margins) else None,
+            organic_sessions=None, organic_reason='Search query unavailable; aggregate remains unassigned')
+        # Wordstat historical week and observed Direct window must actually match.
+        anchor = cluster.get('average_window_end')
+        aligned = bool(anchor and start.date() == date.fromisoformat(anchor)-timedelta(days=6)
+            and end.date() == date.fromisoformat(anchor)+timedelta(days=1)
+            and start.hour == end.hour == 0 and start.minute == end.minute == 0
+            and start.second == end.second == 0 and start.microsecond == end.microsecond == 0)
+        cluster.update(joined=item, observed_window={'start':start.isoformat(),'end_exclusive':end.isoformat(),
+            'wordstat_week_aligned':aligned}, **coverage_proxy(cluster,item['impressions'],item['clicks'],healthy and aligned))
+        missing = []
+        if not cluster.get('complete') or not aligned: missing.append('fresh_aligned_demand_window')
+        if not healthy: missing.append('health')
+        if visits < 20 or paid < 3: missing.append('conversion_sample')
+        if item['contribution_before_ads_rub'] is None: missing.append('confirmed_margin')
+        # Landing quality/ranking is not proven merely because the URL exists.
+        missing.append('landing_quality')
+        cluster.update(missing_score_inputs=missing, opportunity_score=None,
+            confidence='LOW_SAMPLE' if visits < 20 else 'INSUFFICIENT_CONFIRMED_INPUTS', action='RECOMMEND_ONLY')
+    result.update(joined_at=end.isoformat(), joined_unassigned=unassigned, mode='DRY_RUN',
+        score_reason='Score withheld until fresh aligned demand, conversion, margin and landing evidence are confirmed')
+    return result
 
 
 async def sync(controller, c, now):

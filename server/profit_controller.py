@@ -559,6 +559,20 @@ class Controller:
                    'attribution':{'real_yclid_orders':sum(bool((value_json(r['attribution']) or {}).get('yclid')) for r in orders)},
                    'live_writes':self.writes,'stock':{'units':None,'basis':'owner estimate 700; authoritative inventory not connected'}}
         payload['stock'] = stock
+        # Reuse the already fetched Search report: no extra Wordstat/report calls.
+        # A demand diagnostic failure must not stop the existing CPA controller.
+        try:
+            demand = await self.state(c, 'wordstat_demand') or {}
+            sessions = [dict(r) for r in await c.fetch('''SELECT attribution,is_test,is_internal,traffic_class
+                FROM profit_funnel_sessions WHERE started_at >= $1 AND started_at < $2''', start, now)]
+            service = await self.state(c, 'service_checks') or {}
+            demand = wordstat_demand.joined_metrics(demand, stats, sessions, orders, start, now,
+                healthy=bool(service.get('checks')) and all(service['checks'].values()))
+            await self.put(c, 'wordstat_demand', demand)
+            payload['wordstat_join'] = {'mode': demand['mode'], 'joined_at': demand['joined_at'],
+                'unassigned': demand['joined_unassigned']}
+        except Exception as exc:
+            payload['wordstat_join'] = {'mode': 'DRY_RUN', 'error': type(exc).__name__}
         if stock.get('estimated_units') is not None:
             for threshold in (300,150,100,50):
                 if stock['estimated_units'] < threshold:
