@@ -9,9 +9,9 @@ class CPAGuards(unittest.TestCase):
         self.data={'strategy_verified':True,'balance':1000,'health':True,'economic_max':350,
             'paid_7d':3,'clicks_7d':10,'cac_paid':100,'observed_days':3,
             'delivery_limited':True,'attribution_complete':True}
-    def decision(self,current=100,**changes):return cpa_decision(current,self.data|changes,self.now)
+    def decision(self,current=200,**changes):return cpa_decision(current,self.data|changes,self.now)
     def test_step_and_upper_bound(self):
-        self.assertEqual(self.decision()[:2],('SET',Decimal(125)))
+        self.assertEqual(self.decision()[:2],('SET',Decimal(225)))
         self.assertEqual(self.decision(325)[:2],('SET',Decimal(350)))
         self.assertEqual(self.decision(350)[0],'HOLD')
         self.assertEqual(self.decision(99)[0],'REVIEW');self.assertEqual(self.decision(351)[0],'REVIEW')
@@ -20,7 +20,7 @@ class CPAGuards(unittest.TestCase):
     def test_pause_health_and_goal(self):
         for changes,state in [({'paused':True},'PAUSED'),({'health':False},'BLOCKED_FUNNEL'),({'strategy_verified':False},'BLOCKED')]:
             self.assertEqual(self.decision(**changes)[:2],(state,None))
-    def test_cooldown(self):self.assertEqual(cpa_decision(100,self.data,self.now,self.now-timedelta(hours=23))[2],'24h_cooldown')
+    def test_cooldown(self):self.assertEqual(cpa_decision(200,self.data,self.now,self.now-timedelta(hours=23))[2],'24h_cooldown')
     def test_broken_funnel_not_cured_with_higher_cpa(self):self.assertEqual(self.decision(clicks_7d=30,paid_7d=0)[2],'traffic_without_verified_payments')
     def test_unprofitable_suspend_instead_of_gradual_loss(self):
         self.assertEqual(self.decision(250,economic_max=200)[:2],('SUSPEND',None))
@@ -41,20 +41,28 @@ class CPAGuards(unittest.TestCase):
         self.assertEqual(self.decision(economic_max=None,paid_7d=0,attribution_complete=False,
             prepaid_probe_ready=True,demand_exists=True),('HOLD',None,'economics_unknown'))
         self.assertEqual(self.decision(paid_7d=0,prepaid_probe_ready=True,demand_exists=True),
-            ('SET',Decimal(125),'prepaid_delivery_probe'))
+            ('SET',Decimal(225),'prepaid_delivery_probe'))
         self.assertEqual(self.decision(paid_7d=0,prepaid_probe_ready=True,demand_exists=False)[2],
             'demand_unknown_or_absent')
         self.assertEqual(self.decision(economic_max=None,paid_7d=1,prepaid_probe_ready=True)[0],'HOLD')
         self.assertEqual(self.decision(350,economic_max=None,paid_7d=0,prepaid_probe_ready=True)[0],'HOLD')
-        self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,balance=110)[0],'HOLD')
-        self.assertEqual(self.decision(economic_max=110,paid_7d=0,prepaid_probe_ready=True)[:2],('HOLD',None))
+        self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,balance=210)[0],'HOLD')
+        self.assertEqual(self.decision(economic_max=210,paid_7d=0,prepaid_probe_ready=True)[:2],('HOLD',None))
+
+    def test_owner_managerial_probe_does_not_need_first_paid_or_fake_actual_cost(self):
+        self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,
+            demand_exists=True,probe_economic_max=350),('SET',Decimal(225),'prepaid_delivery_probe'))
+        self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,
+            demand_exists=False,probe_economic_max=350)[2],'demand_unknown_or_absent')
+        self.assertEqual(self.decision(economic_max=None,paid_7d=1,prepaid_probe_ready=True,
+            demand_exists=True,probe_economic_max=350)[2],'economics_unknown')
 
     def test_probe_cannot_bypass_funnel_pause_or_cooldown(self):
         data=self.data|{'economic_max':None,'paid_7d':0,'prepaid_probe_ready':True}
-        self.assertEqual(cpa_decision(100,data,self.now,self.now-timedelta(hours=23))[2],'24h_cooldown')
+        self.assertEqual(cpa_decision(200,data,self.now,self.now-timedelta(hours=23))[2],'24h_cooldown')
         for changes,state in [({'health':False},'BLOCKED_FUNNEL'),({'paused':True},'PAUSED'),
                               ({'strategy_verified':False},'BLOCKED'),({'clicks_7d':30},'HOLD')]:
-            self.assertEqual(cpa_decision(100,data|changes,self.now)[0],state)
+            self.assertEqual(cpa_decision(200,data|changes,self.now)[0],state)
 
     def test_probe_needs_full_days_current_regime_and_low_delivery(self):
         previous={'delivery_probe_policy_version':1,'delivery_probe_since':'2026-10-01T10:00:00+00:00'}
@@ -73,6 +81,39 @@ class CPAGuards(unittest.TestCase):
 
 
 class ContinuationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ended_period_continues_same_campaign_at_new_minimum(self):
+        import copy,os
+        from profit_controller import Controller
+        from unittest.mock import AsyncMock,patch
+        now=datetime(2026,10,6,tzinfo=timezone.utc)
+        checks={k:True for k in ('backend','landing','payment_api','checkout','pvz','metrika_goal',
+            'paid_server_enabled','paid_dedupe_ready','no_failed_paid_uploads','no_mass_errors')}
+        campaign={'Id':715029848,'State':'ENDED','Status':'ACCEPTED','EndDate':'2026-10-05',
+            'UnifiedCampaign':{'BiddingStrategy':{'Search':{'BiddingStrategyType':'SERVING_OFF'},
+            'Network':{'BiddingStrategyType':'PAY_FOR_CONVERSION','PayForConversion':{
+                'Cpa':100000000,'GoalId':666936854,'BudgetType':'CUSTOM_PERIOD_BUDGET',
+                'CustomPeriodBudget':{'EndDate':'2026-10-05'}}}},'CounterIds':{'Items':[112544007]}}}
+        saved=copy.deepcopy(campaign);saved.update(State='ON',EndDate=None)
+        saved['UnifiedCampaign']['BiddingStrategy']['Network']['PayForConversion'].update(
+            Cpa=200000000,BudgetType='WEEKLY_BUDGET',WeeklySpendLimit=1000000000,CustomPeriodBudget=None)
+        worker=Controller(None,None);worker.state=AsyncMock(side_effect=[
+            {'state':'BLOCKED','reason':'campaign_changed_or_owner_paused_no_auto_resume'},
+            None,{'health_checks':checks,'checked_at':now.isoformat()}])
+        worker.put=AsyncMock();worker.notify=AsyncMock();worker.cpa_balance=AsyncMock(return_value=Decimal(2800))
+        worker.api=AsyncMock(side_effect=[{'Campaigns':[campaign]},{'UpdateResults':[{'Id':715029848}]},{'Campaigns':[saved]}])
+        db=AsyncMock();db.fetchval.return_value=1
+        with patch.dict(os.environ,{'RSYA_CONTINUE_AFTER_20261005':'true','PROFIT_CONTROLLER_LIVE':'true'}):
+            await worker.rsya_continuation(db,now)
+        self.assertEqual(worker.api.call_count,3)
+        update=worker.api.call_args_list[1].args[2]['Campaigns'][0]
+        self.assertEqual(update['Id'],715029848)
+        self.assertIsNone(update['EndDate'])
+        pay=update['UnifiedCampaign']['BiddingStrategy']['Network']['PayForConversion']
+        self.assertEqual(pay['Cpa'],200000000)
+        self.assertEqual(pay['GoalId'],666936854)
+        self.assertEqual(pay['WeeklySpendLimit'],1000000000)
+        self.assertTrue(any(call.args[1]=='rsya_continuation_applied' for call in worker.put.call_args_list))
+
     async def test_current_accepted_period_is_not_mutated(self):
         from profit_controller import Controller
         from unittest.mock import AsyncMock,patch

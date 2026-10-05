@@ -15,7 +15,11 @@ MOSCOW = ZoneInfo('Europe/Moscow')
 MIN_BID, MAX_BID, STEP = Decimal('10'), Decimal('20'), Decimal('.5')
 LOCK = 714566814
 CPA_CAMPAIGNS={714566814:'Search',715029848:'Network'}
-CPA_MIN,CPA_MAX,CPA_STEP=Decimal(100),Decimal(350),Decimal(25)
+CPA_MIN,CPA_MAX,CPA_STEP=Decimal(200),Decimal(350),Decimal(25)
+RELEVANT_IMPRESSIONS_TARGET_PER_DAY=20000
+# Managerial scenario, not actual profit; unknown returns remain explicitly unknown.
+PREPAID_PROBE_CAP=Decimal(350)
+PREPAID_PROBE_SCENARIO={"price":1200,"cogs":230,"ozon_conservative_max":130,"tax_rate":.06,"yookassa_historical_rate":.019,"base_margin":745.2,"returns_nonpickup":None,"source":"owner_managerial_20261006","status":"ESTIMATED_WITH_UNKNOWN_RETURNS"}
 PAID_GOAL=666936854
 
 
@@ -102,7 +106,10 @@ def cpa_decision(current,data,now,last_change=None):
     # older CPC reports and an unobserved cost cannot be treated as evidence.
     if paid==0 and data.get('prepaid_probe_ready'):
         if not data.get('demand_exists'):return 'HOLD',None,'demand_unknown_or_absent'
-        if cap is None:return 'HOLD',None,'economics_unknown'
+        if cap is None:
+            probe_cap=data.get('probe_economic_max')
+            if probe_cap is None:return 'HOLD',None,'economics_unknown'
+            cap=min(CPA_MAX,Decimal(str(probe_cap)))
         target=min(CPA_MAX,current+CPA_STEP)
         if target>current and target<=cap and Decimal(str(data['balance']))>=target:
             return 'SET',target,'prepaid_delivery_probe'
@@ -667,7 +674,8 @@ class Controller:
         strategy=copy.deepcopy(campaign['UnifiedCampaign']['BiddingStrategy'])
         current=Decimal(str(strategy.get(side,{}).get('PayForConversion',{}).get('Cpa',0)))/1000000
         if action=='SET':
-            if target is None or not CPA_MIN<=target<=CPA_MAX or abs(target-current)>CPA_STEP:
+            owner_floor=(reason=='owner_range_floor_20261006' and current<CPA_MIN and target==CPA_MIN)
+            if target is None or not CPA_MIN<=target<=CPA_MAX or (abs(target-current)>CPA_STEP and not owner_floor):
                 raise ValueError('CPA bounds')
             strategy[side]['PayForConversion']['Cpa']=int(target*1000000)
         aid=await c.fetchval('''INSERT INTO profit_cpa_actions(campaign_id,action,reason,before_cpa,after_cpa,state)
@@ -692,9 +700,16 @@ class Controller:
         # One explicit owner-authorized continuation, not automatic budget scaling.
         if os.getenv('RSYA_CONTINUE_AFTER_20261005','').lower()!='true':return
         key='rsya_continuation';plan=await self.state(c,key)
+        # New explicit owner policy permits the ended-period retry once. Other
+        # blocked/ambiguous writes and owner pauses remain protected.
+        if (plan and plan.get('state')=='BLOCKED' and plan.get('policy_version')!=2
+            and plan.get('reason')=='campaign_changed_or_owner_paused_no_auto_resume'):
+            plan={**plan,'state':'READY','policy_version':2,'cpa_rub':200,
+                  'reason':'owner_reauthorized_ended_period_20261006'}
+            await self.put(c,key,plan)
         if not plan:
             plan={'state':'READY','campaign_id':715029848,'after_msk':'2026-10-06T00:00:00+03:00',
-                  'weekly_budget_ex_vat_rub':1000,'cpa_rub':100,'autofunding':False,'auto_budget_increase':False,
+                  'policy_version':2,'weekly_budget_ex_vat_rub':1000,'cpa_rub':200,'autofunding':False,'auto_budget_increase':False,
                   'provider_acceptance':'pending scheduled API read-back; never retry at a higher budget'}
             await self.put(c,key,plan)
         if plan['state']!='READY' or now.astimezone(MOSCOW).date().isoformat()<'2026-10-06':return
@@ -703,20 +718,20 @@ class Controller:
         if not technical_paid_health(health.get('health_checks',{})):return
         if not health.get('checked_at') or now-datetime.fromisoformat(health['checked_at'])>timedelta(hours=2):return
         balance=await self.cpa_balance()
-        if balance is None or balance<100:return
+        if balance is None or balance<CPA_MIN:return
         campaign=(await self.api('campaigns','get',{'SelectionCriteria':{'Ids':[715029848]},
             'FieldNames':['Id','State','Status','EndDate'],'UnifiedCampaignFieldNames':['BiddingStrategy','CounterIds']}))['Campaigns'][0]
         strategy=campaign['UnifiedCampaign']['BiddingStrategy'];pay=strategy.get('Network',{}).get('PayForConversion',{})
-        if (campaign['State']!='ON' or campaign['Status']!='ACCEPTED' or strategy['Network']['BiddingStrategyType']!='PAY_FOR_CONVERSION'
-            or pay.get('GoalId')!=PAID_GOAL or pay.get('Cpa')!=100000000 or campaign['EndDate']!='2026-10-05'):
+        if (campaign['State'] not in ('ON','ENDED') or campaign['Status']!='ACCEPTED' or strategy['Network']['BiddingStrategyType']!='PAY_FOR_CONVERSION'
+            or pay.get('GoalId')!=PAID_GOAL or pay.get('Cpa') not in (100000000,200000000) or campaign['EndDate']!='2026-10-05'):
             plan.update(state='BLOCKED',reason='campaign_changed_or_owner_paused_no_auto_resume')
             await self.put(c,key,plan)
             await self.notify(c,'rsya-continuation-blocked','⚠️ Продолжение РСЯ №715029848 требует проверки: исходные настройки изменились. Новый дубль и пополнение не создавались.')
             return
         import copy
         strategy=copy.deepcopy(strategy)
-        strategy['Network']['PayForConversion'].update(BudgetType='WEEKLY_BUDGET',WeeklySpendLimit=1000000000,CustomPeriodBudget=None)
-        aid=await c.fetchval("INSERT INTO profit_cpa_actions(campaign_id,action,reason,before_cpa,after_cpa,state) VALUES(715029848,'CONTINUE','owner_authorized_after_test',100,100,'prepared') RETURNING id")
+        strategy['Network']['PayForConversion'].update(Cpa=int(CPA_MIN*1000000),BudgetType='WEEKLY_BUDGET',WeeklySpendLimit=1000000000,CustomPeriodBudget=None)
+        aid=await c.fetchval("INSERT INTO profit_cpa_actions(campaign_id,action,reason,before_cpa,after_cpa,state) VALUES(715029848,'CONTINUE','owner_authorized_after_test',100,200,'prepared') RETURNING id")
         plan.update(state='CLAIMED',claimed_at=now.isoformat());await self.put(c,key,plan)
         try:
             if not self.writes:raise DirectError('live_writes_disabled')
@@ -725,11 +740,11 @@ class Controller:
             if len(items)!=1 or items[0].get('Errors'):raise DirectError('continuation_rejected_no_budget_raise')
             saved=(await self.api('campaigns','get',{'SelectionCriteria':{'Ids':[715029848]},'FieldNames':['Id','EndDate'],'UnifiedCampaignFieldNames':['BiddingStrategy']}))['Campaigns'][0]
             p=saved['UnifiedCampaign']['BiddingStrategy']['Network']['PayForConversion']
-            if saved.get('EndDate') or p.get('WeeklySpendLimit')!=1000000000 or p.get('Cpa')!=100000000 or p.get('GoalId')!=PAID_GOAL:raise DirectError('continuation_readback_unknown')
+            if saved.get('EndDate') or p.get('WeeklySpendLimit')!=1000000000 or p.get('Cpa')!=int(CPA_MIN*1000000) or p.get('GoalId')!=PAID_GOAL:raise DirectError('continuation_readback_unknown')
             await c.execute("UPDATE profit_cpa_actions SET state='applied',updated_at=NOW() WHERE id=$1",aid)
-            plan.update(state='APPLIED',applied_at=now.isoformat());await self.put(c,key,plan)
+            plan.update(state='APPLIED',cpa_rub=int(CPA_MIN),applied_at=now.isoformat());await self.put(c,key,plan)
             await self.put(c,'rsya_continuation_applied',plan)
-            await self.notify(c,'rsya-continuation-applied','📣 РСЯ №715029848 продолжена в той же кампании: VERIFIED payment_success, CPA 100 ₽, недельный лимит 1 000 ₽ без НДС. Автопополнение и увеличение бюджета выключены.')
+            await self.notify(c,'rsya-continuation-applied','📣 РСЯ №715029848 продолжена в той же кампании: VERIFIED payment_success, CPA 200 ₽, недельный лимит 1 000 ₽ без НДС. Автопополнение и увеличение бюджета выключены.')
         except Exception as exc:
             await c.execute("UPDATE profit_cpa_actions SET state='unknown',updated_at=NOW() WHERE id=$1",aid)
             plan.update(state='BLOCKED',reason=getattr(exc,'code',type(exc).__name__))
@@ -744,7 +759,7 @@ class Controller:
             await self.put(c,'wordstat_demand',demand)
         hour=now.replace(minute=0,second=0,microsecond=0)
         monitor=await self.state(c,'cpa_monitor') or {}
-        if monitor.get('hour')==hour.isoformat():return
+        if monitor.get('hour')==hour.isoformat() and monitor.get('policy_version')==2:return
         await self.rsya_continuation(c,now)
         campaigns=(await self.api('campaigns','get',{'SelectionCriteria':{'Ids':list(CPA_CAMPAIGNS)},
             'FieldNames':['Id','State','Status','EndDate'],'UnifiedCampaignFieldNames':['BiddingStrategy','CounterIds']}))['Campaigns']
@@ -799,13 +814,18 @@ class Controller:
                 margins=[Decimal(str(r['amount']))*Decimal('.94')-r['quantity']*COGS_UNIT_RUB-sum(Decimal(str(r[k])) for k in ('yookassa','ozon','returns_other')) for r in rows]
                 economic_max=max(Decimal(0),min(margins)-Decimal(str(risk['rub_per_order'])))
             previous=await self.state(c,'cpa:'+str(cid)) or {}
+            if (current<CPA_MIN and verified and technical_paid_health(checks) and campaign['State']=='ON'
+                and campaign['Status']=='ACCEPTED' and not pause and not unresolved and balance is not None and balance>=CPA_MIN):
+                if await self.cpa_write(c,campaign,'SET','owner_range_floor_20261006',CPA_MIN):
+                    current=CPA_MIN;last=now
+                    previous={**previous,'delivery_probe_policy_version':1,'delivery_probe_since':now.isoformat()}
             first=previous.get('first_observed_at',now.isoformat());observed=(now-datetime.fromisoformat(first)).total_seconds()/86400
             probe=prepaid_delivery_window(previous,now,verified and technical_paid_health(checks)
                 and campaign['State']=='ON' and campaign['Status']=='ACCEPTED' and not pause and not unresolved,stats)
             data={'paused':pause,'strategy_verified':verified,'balance':balance,'health':technical_paid_health(checks),
                 'economic_max':economic_max,'paid_7d':paid,'clicks_7d':clicks,'cac_paid':float(spend/paid) if paid else None,
                 'observed_days':observed,'delivery_limited':impressions<100,'attribution_complete':paid>=3 and checks['paid_delivery_proven'],
-                'prepaid_probe_ready':probe['ready'],
+                'prepaid_probe_ready':probe['ready'],'probe_economic_max':PREPAID_PROBE_CAP,
                 'demand_exists':demand.get('demand_exists') is True}
             state,target,reason=cpa_decision(current,data,now,last)
             emergency=(not verified or service.get('failures',0)>=2 or (cid==715029848 and not (await self.state(c,'rsya_continuation_applied')) and spend>=Decimal(900)))
@@ -830,14 +850,14 @@ class Controller:
                 'agent_state':agent_state,'campaign_state':campaign['State'],'moderation':campaign['Status'],'impressions_7d':impressions,'clicks_7d':clicks,'sample':'LOW SAMPLE' if paid<3 else 'OBSERVED','paid_24h':paid24,'paid_7d':paid,'spend_7d':float(spend),'cac_paid':data['cac_paid'],'state':state,
                 'reason':reason,'last_change':last.isoformat() if last else None,'checked_at':now.isoformat(),
                 'evaluated_at':now.isoformat() if due else evaluated,'first_observed_at':first,
-                'economic_max':float(economic_max) if economic_max is not None else None,'health_checks':checks,
+                'economic_max':float(economic_max) if economic_max is not None else None,'prepaid_probe_scenario':PREPAID_PROBE_SCENARIO,'relevant_impressions_target_per_day':RELEVANT_IMPRESSIONS_TARGET_PER_DAY,'health_checks':checks,
                 'delivery_probe_policy_version':probe['delivery_probe_policy_version'],
                 'delivery_probe_since':probe['delivery_probe_since'],'delivery_probe_window':probe,
                 'economics_status':'UNKNOWN' if economic_max is None else 'OBSERVED',
                 'wordstat_state':demand.get('state'), 'demand_exists':data['demand_exists'],
                 'balance':float(balance) if balance is not None else None,'budget_unchanged':True}
             await self.put(c,'cpa:'+str(cid),record);summary.append(record)
-        await self.put(c,'cpa_monitor',{'hour':hour.isoformat(),'campaigns':summary,'min_cpa':100,'max_cpa':350,'step':25,'cooldown_hours':24,'no_funding':True,'state':'ACTIVE' if all(x['agent_state']=='ACTIVE' for x in summary) else 'ERROR' if any(x['agent_state']=='ERROR' for x in summary) else 'PAUSED' if any(x['agent_state']=='PAUSED' for x in summary) else 'WAITING'})
+        await self.put(c,'cpa_monitor',{'hour':hour.isoformat(),'campaigns':summary,'policy_version':2,'relevant_impressions_target_per_day':RELEVANT_IMPRESSIONS_TARGET_PER_DAY,'min_cpa':200,'max_cpa':350,'step':25,'cooldown_hours':24,'no_funding':True,'state':'ACTIVE' if all(x['agent_state']=='ACTIVE' for x in summary) else 'ERROR' if any(x['agent_state']=='ERROR' for x in summary) else 'PAUSED' if any(x['agent_state']=='PAUSED' for x in summary) else 'WAITING'})
 
     async def join_wordstat(self, c, demand, stats, start, now, checks):
         try:
@@ -875,7 +895,7 @@ class Controller:
                             await self.daily_shipments(c,now)
                             self.status={'state':'running','checked_at':now.isoformat(),'live_writes':self.writes,
                                          'campaigns':list(CPA_CAMPAIGNS),'mode':'VERIFIED_PAID_CPA',
-                                         'min_cpa_rub':100,'max_cpa_rub':350,'step_rub':25,
+                                         'min_cpa_rub':200,'max_cpa_rub':350,'step_rub':25,
                                          'daily_spend_cap_rub':10000,'ordinary_cooldown_hours':24}
                             await self.put(c,'health',self.status)
                         finally:
