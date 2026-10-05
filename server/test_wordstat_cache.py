@@ -3,6 +3,23 @@ from datetime import datetime,timezone
 from unittest.mock import patch
 from wordstat_cache import request,scope
 
+class UsageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_moscow_day_and_estimate_never_claim_invoice(self):
+        from unittest.mock import AsyncMock
+        from datetime import date
+        from decimal import Decimal
+        from wordstat_cache import usage
+        c=AsyncMock()
+        c.fetch.return_value=[{'date_msk':date(2026,10,5),'calls':5,'estimated_rub':Decimal('.10')},
+                              {'date_msk':date(2026,10,6),'calls':37,'estimated_rub':Decimal('.74')}]
+        result=await usage(c,datetime(2026,10,5,22,tzinfo=timezone.utc))
+        self.assertEqual(result['provider_calls_today'],37)
+        self.assertEqual(result['provider_calls_7d'],42)
+        self.assertAlmostEqual(result['estimated_rub_7d'],.84)
+        self.assertEqual(result['cost_status'],'ESTIMATED_NOT_INVOICED')
+        self.assertEqual(result['provider_daily_call_cap'],64)
+        self.assertNotIn('actual_cost',result)
+
 class Tx:
     def __init__(self,lock):self.lock=lock
     async def __aenter__(self):await self.lock.acquire()

@@ -177,6 +177,8 @@ async def sync(controller, c, now):
         previous['demand_exists'],previous['demand_evidence']=recent_demand_evidence(previous,today)
         previous['shared_global_provider_calls_cap']=wordstat_cache.MAX_PROVIDER_CALLS_PER_MSK_DAY
         previous['request_cost_status']='ESTIMATED_NOT_INVOICED'
+        if await c.fetchval("SELECT to_regclass('public.wordstat_api_usage') IS NOT NULL"):
+            previous['shared_usage']=await wordstat_cache.usage(c,now)
         await controller.put(c,'wordstat_demand',previous)
         return previous
     state = {'attempt_date': today.isoformat(), 'checked_at': now.isoformat(),
@@ -224,5 +226,7 @@ async def sync(controller, c, now):
     state['demand_exists'],state['demand_evidence']=recent_demand_evidence(state,today)
     state['shared_global_provider_calls_cap']=wordstat_cache.MAX_PROVIDER_CALLS_PER_MSK_DAY
     state['request_cost_status']='ESTIMATED_NOT_INVOICED'
+    if await c.fetchval("SELECT to_regclass('public.wordstat_api_usage') IS NOT NULL"):
+        state['shared_usage']=await wordstat_cache.usage(c,now)
     await controller.put(c, 'wordstat_demand', state)
     return state

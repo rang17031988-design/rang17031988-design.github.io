@@ -74,6 +74,12 @@ def advertising(r,detail=False):
         if attributed:
             lines += [f'📦 Связанные заказы: {number(attributed["orders"])}',f'💳 Связанные оплаты: {number(attributed["paid"])}',f'🎯 Стоимость связанной оплаты: {rub(attributed["cac"])}']
         else:lines.append('🏷 Связь клика с оплатой: пока нет данных')
+    usage=r.get('wordstat_demand',{}).get('shared_usage')
+    if usage:
+        lines += ['', '🔎 Wordstat: общий расход после включения cache',
+                  'Сегодня: '+number(usage.get('provider_calls_today'))+' API • оценка '+rub(usage.get('estimated_rub_today')),
+                  '7 дней: '+number(usage.get('provider_calls_7d'))+' API • оценка '+rub(usage.get('estimated_rub_7d')),
+                  'Общий лимит: '+number(usage.get('provider_daily_call_cap'))+' API/день; это оценка, не счёт провайдера.']
     if detail:
         demand=r.get('wordstat_demand',{})
         lines += ['', '🔎 WORDSTAT: '+demand.get('state','UNKNOWN'),

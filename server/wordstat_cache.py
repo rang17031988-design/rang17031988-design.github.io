@@ -48,6 +48,21 @@ async def schema(c):
           status_code INTEGER NOT NULL, requested_at TIMESTAMPTZ NOT NULL,
           estimated_unit_cost_rub NUMERIC NOT NULL, cost_status TEXT NOT NULL);''')
 
+async def usage(c,now):
+    rows=await c.fetch('''SELECT (requested_at AT TIME ZONE 'Europe/Moscow')::date date_msk,
+      count(*) calls,sum(estimated_unit_cost_rub) estimated_rub FROM wordstat_api_usage
+      WHERE (requested_at AT TIME ZONE 'Europe/Moscow')::date>=
+      ($1::timestamptz AT TIME ZONE 'Europe/Moscow')::date-6 GROUP BY 1 ORDER BY 1''',now)
+    today=now.astimezone(__import__('zoneinfo').ZoneInfo('Europe/Moscow')).date()
+    current=next((r for r in rows if r['date_msk']==today),None)
+    return {'checked_at':now.isoformat(),'observation_scope':'shared cache rollout onward',
+      'cost_status':'ESTIMATED_NOT_INVOICED','provider_calls_today':int(current['calls']) if current else 0,
+      'estimated_rub_today':float(current['estimated_rub']) if current else 0,
+      'provider_calls_7d':sum(int(r['calls']) for r in rows),
+      'estimated_rub_7d':sum(float(r['estimated_rub']) for r in rows),
+      'provider_daily_call_cap':MAX_PROVIDER_CALLS_PER_MSK_DAY,
+      'daily_estimated_cap_rub':MAX_PROVIDER_CALLS_PER_MSK_DAY*ESTIMATED_UNIT_RUB}
+
 async def request(c,http,operation,body,caller,now=None):
     now=now or datetime.now(timezone.utc)
     key,folder=os.getenv('YANDEX_WORDSTAT_API_KEY'),os.getenv('YANDEX_FOLDER_ID')

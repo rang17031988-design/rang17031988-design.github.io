@@ -578,12 +578,15 @@ async def controller_audit(preview: bool = False, x_internal_key: str | None = H
         snapshots = await c.fetch('SELECT hour FROM profit_controller_snapshots ORDER BY hour DESC LIMIT 5')
         states = await c.fetch('SELECT key,value,updated_at FROM profit_controller_state ORDER BY key')
         counts = await c.fetch('SELECT state,count(*) AS count FROM profit_controller_actions GROUP BY state')
+        cpa_actions=await c.fetch('''SELECT id,campaign_id,action,reason,before_cpa,after_cpa,state,created_at,updated_at
+            FROM profit_cpa_actions ORDER BY id DESC LIMIT 40''')
         report = None
         if preview:
             # Read the real cohort and provider report; never notify or create orders.
             report = await _profit_controller.weekly(c, datetime.now(timezone.utc), preview=True)
     return {'runtime': _profit_controller.status, 'snapshots': [dict(r) for r in snapshots],
             'states': [dict(r) for r in states], 'actions': [dict(r) for r in counts],
+            'cpa_actions':[dict(r) for r in cpa_actions],
             'weekly_preview': report}
 
 @app.post('/api/internal/commerce/cpa-refresh', include_in_schema=False)
