@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 from datetime import date,timedelta,datetime,timezone
 from wordstat_demand import normalized_history,demand_metrics,coverage_proxy,cluster_for_term,joined_metrics
 
@@ -56,3 +57,29 @@ class DemandTests(unittest.TestCase):
             datetime(2026,9,29,tzinfo=timezone.utc),datetime(2026,10,5,tzinfo=timezone.utc),True)
         self.assertEqual(result['clusters'][0]['coverage_status'],'UNKNOWN')
         self.assertIn('fresh_aligned_demand_window',result['clusters'][0]['missing_score_inputs'])
+
+class RuntimeJoinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_join_persists_and_contains_failure(self):
+        from profit_controller import Controller
+        controller = Controller.__new__(Controller)
+        controller.put = AsyncMock()
+        controller.order_cohort = AsyncMock(return_value=[])
+        connection = AsyncMock()
+        connection.fetch.return_value = []
+        now = datetime(2026,10,5,tzinfo=timezone.utc)
+        with patch('profit_controller.wordstat_demand.joined_metrics', return_value={'joined_at':now.isoformat()}) as join:
+            await controller.join_wordstat(connection, {}, [], now, now, {})
+            join.assert_called_once()
+            self.assertEqual(controller.put.await_args_list[-1].args[1], 'wordstat_join_health')
+            self.assertEqual(controller.put.await_args_list[-1].args[2]['state'], 'OBSERVED')
+        connection.fetch.side_effect = RuntimeError('private response must not be logged')
+        await controller.join_wordstat(connection, {}, [], now, now, {})
+        self.assertEqual(controller.put.await_args.args[2]['error'], 'RuntimeError')
+        self.assertNotIn('private', str(controller.put.await_args.args[2]))
+
+    def test_active_cpa_path_calls_join(self):
+        import inspect
+        from profit_controller import Controller
+        source = inspect.getsource(Controller.cpa_monitor)
+        self.assertIn('await self.join_wordstat(c, demand, stats, cost_start, now, checks)', source)
+        self.assertIn("if side == 'Search':", source)

@@ -772,6 +772,10 @@ class Controller:
             last=await c.fetchval("SELECT max(created_at) FROM profit_cpa_actions WHERE campaign_id=$1 AND state='applied' AND action='SET'",cid)
             unresolved=await c.fetchval("SELECT EXISTS(SELECT 1 FROM profit_cpa_actions WHERE campaign_id=$1 AND state IN ('prepared','unknown'))",cid)
             stats=await self.report(start,today,campaign_id=cid)
+            if side == 'Search':
+                # The live loop uses cpa_monitor, not the retired CPC hourly path.
+                # Reuse its Search report and isolate diagnostic failures from ads.
+                await self.join_wordstat(c, demand, stats, cost_start, now, checks)
             spend=sum(Decimal(str(x['Cost'])) for x in stats);clicks=sum(x['Clicks'] for x in stats);impressions=sum(x['Impressions'] for x in stats)
             rows=await c.fetch('''SELECT p.amount,p.quantity,p.created_at,k.yookassa,k.ozon,k.returns_other,p.ozon_status
                 FROM commerce_pending_orders p JOIN insales_yookassa_payments y ON y.payment_id=p.payment_id
@@ -825,6 +829,19 @@ class Controller:
                 'balance':float(balance) if balance is not None else None,'budget_unchanged':True}
             await self.put(c,'cpa:'+str(cid),record);summary.append(record)
         await self.put(c,'cpa_monitor',{'hour':hour.isoformat(),'campaigns':summary,'min_cpa':100,'max_cpa':350,'step':25,'cooldown_hours':24,'no_funding':True,'state':'ACTIVE' if all(x['agent_state']=='ACTIVE' for x in summary) else 'ERROR' if any(x['agent_state']=='ERROR' for x in summary) else 'PAUSED' if any(x['agent_state']=='PAUSED' for x in summary) else 'WAITING'})
+
+    async def join_wordstat(self, c, demand, stats, start, now, checks):
+        try:
+            sessions = [dict(r) for r in await c.fetch('''SELECT attribution,is_test,is_internal,traffic_class
+                FROM profit_funnel_sessions WHERE started_at >= $1 AND started_at < $2''', start, now)]
+            orders = await self.order_cohort(c, start, now)
+            joined = wordstat_demand.joined_metrics(demand, stats, sessions, orders, start, now,
+                healthy=technical_paid_health(checks))
+            await self.put(c, 'wordstat_demand', joined)
+            await self.put(c, 'wordstat_join_health', {'state': 'OBSERVED', 'joined_at': joined['joined_at']})
+        except Exception as exc:
+            await self.put(c, 'wordstat_join_health', {'state': 'DRY_RUN', 'error': type(exc).__name__,
+                'checked_at': now.isoformat()})
 
     async def loop(self):
         while True:
