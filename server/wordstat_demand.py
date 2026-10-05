@@ -4,6 +4,8 @@ Representative query counts overlap and MUST NOT be summed or interpreted as
 available advertising impressions. Missing provider days remain unknown.
 """
 import json, os, re, copy
+import wordstat_cache
+from product_catalog import COGS_UNIT_RUB
 from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -112,7 +114,7 @@ def joined_metrics(demand, direct, sessions, orders, start, end, healthy=False):
         item = totals[cid]; item['verified_paid'] += 1; item['revenue_rub'] += float(row['amount'])
         margin = None
         if row.get('ozon_status') == 'delivered' and not row.get('return_pending') and not row.get('return_received') and all(row.get(k) is not None for k in ('yookassa','ozon','returns_other')):
-            margin = float(row['amount'])*.94 - row['quantity']*230 - sum(float(row[k]) for k in ('yookassa','ozon','returns_other'))
+            margin = float(row['amount'])*.94 - row['quantity']*float(COGS_UNIT_RUB) - sum(float(row[k]) for k in ('yookassa','ozon','returns_other'))
         item['margins'].append(margin)
     for cluster in result.get('clusters', []):
         item = totals[cluster['cluster_id']]; margins = item.pop('margins')
@@ -172,7 +174,7 @@ async def sync(controller, c, now):
             body = {'folderId': folder, 'phrase': phrase, 'period': 'PERIOD_DAILY',
                 'fromDate': str(today-timedelta(days=35))+'T00:00:00Z',
                 'toDate': str(today)+'T00:00:00Z', 'regions': ['225'], 'devices': ['DEVICE_ALL']}
-            r = await controller.http.post(BASE+'/dynamics', headers={'Authorization': 'Api-key '+key}, json=body, timeout=30)
+            r = await wordstat_cache.request(c,controller.http,'dynamics',body,'cpa_demand',now)
             if r.status_code != 200:
                 state['error'] = 'http_'+str(r.status_code)
                 break  # Quota/auth/provider errors do not consume all remaining calls.

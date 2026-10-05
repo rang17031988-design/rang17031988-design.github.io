@@ -599,6 +599,22 @@ async def cpa_refresh(x_internal_key: str | None = Header(default=None)):
             return await _profit_controller.state(c,'cpa_monitor')
         finally:await c.fetchval('SELECT pg_advisory_unlock($1)',LOCK)
 
+@app.post('/api/internal/wordstat/{operation}', include_in_schema=False)
+async def shared_wordstat(operation: str, request: Request, authorization: str | None = Header(default=None)):
+    import hmac,wordstat_cache
+    key=os.getenv('YANDEX_WORDSTAT_API_KEY','')
+    parts=(authorization or '').split(' ',1)
+    if not key or len(parts)!=2 or parts[0].lower()!='api-key' or not hmac.compare_digest(parts[1],key):
+        raise HTTPException(403,'Forbidden')
+    if db is None:raise HTTPException(503,'Database unavailable')
+    try:
+        body=await request.json()
+        if not isinstance(body,dict):raise ValueError('invalid_body')
+        async with db.acquire() as c:
+            result=await wordstat_cache.request(c,_http,operation,body,'shared_gateway')
+    except (ValueError,TypeError):raise HTTPException(400,'Invalid Wordstat request')
+    return JSONResponse(result.data,status_code=result.status_code,headers={'X-Wordstat-Cache':'HIT' if result.cache_hit else 'MISS'})
+
 @app.get('/api/internal/commerce/paid-dedupe-audit', include_in_schema=False)
 async def paid_dedupe_audit(x_internal_key: str | None = Header(default=None)):
     _operations_access(x_internal_key)
