@@ -57,6 +57,26 @@ class CPAGuards(unittest.TestCase):
         self.assertEqual(self.decision(economic_max=None,paid_7d=1,prepaid_probe_ready=True,
             demand_exists=True,probe_economic_max=350)[2],'economics_unknown')
 
+    def test_old_cpc_clicks_do_not_deadlock_verified_unbilled_probe(self):
+        self.assertEqual(self.decision(economic_max=None,paid_7d=0,clicks_7d=60,
+            prepaid_probe_ready=True,current_regime_unbilled=True,demand_exists=True,
+            probe_economic_max=350),('SET',Decimal(225),'prepaid_delivery_probe'))
+        self.assertEqual(self.decision(economic_max=None,paid_7d=0,clicks_7d=60,
+            prepaid_probe_ready=True,current_regime_unbilled=False,demand_exists=True,
+            probe_economic_max=350)[2],'traffic_without_verified_payments')
+
+    def test_global_delivery_target_and_current_spend_guard(self):
+        previous={'delivery_probe_policy_version':1,'delivery_probe_since':'2026-10-01T10:00:00+00:00'}
+        rows=[{'Date':'2026-10-02','Impressions':500,'Clicks':30,'Cost':0},
+              {'Date':'2026-10-03','Impressions':600,'Clicks':40,'Cost':0}]
+        global_rows=rows+[{'Date':'2026-10-03','Impressions':3000,'Clicks':20,'Cost':0}]
+        probe=prepaid_delivery_window(previous,self.now,True,rows,global_rows)
+        self.assertTrue(probe['ready']);self.assertEqual(probe['global_impressions_average_day'],2050)
+        self.assertFalse(prepaid_delivery_window(previous,self.now,True,rows,
+            global_rows+[{'Date':'2026-10-03','Impressions':40000,'Clicks':0,'Cost':0}])['ready'])
+        self.assertFalse(prepaid_delivery_window(previous,self.now,True,
+            rows+[{'Date':'2026-10-03','Impressions':0,'Clicks':0,'Cost':1}],global_rows)['ready'])
+
     def test_probe_cannot_bypass_funnel_pause_or_cooldown(self):
         data=self.data|{'economic_max':None,'paid_7d':0,'prepaid_probe_ready':True}
         self.assertEqual(cpa_decision(200,data,self.now,self.now-timedelta(hours=23))[2],'24h_cooldown')

@@ -100,7 +100,8 @@ def cpa_decision(current,data,now,last_change=None):
         if cap<CPA_MIN:return 'SUSPEND',None,'economic_cap_below_minimum'
         if current>cap:return 'SUSPEND',None,'economic_cap_below_current'
     paid=data.get('paid_7d',0);clicks=data.get('clicks_7d',0)
-    if clicks>=30 and paid==0:return 'HOLD',None,'traffic_without_verified_payments'
+    if clicks>=30 and paid==0 and not (data.get('prepaid_probe_ready') and data.get('current_regime_unbilled') is True):
+        return 'HOLD',None,'traffic_without_verified_payments'
     # Owner permits pre-PAID delivery discovery, not a claim of profitability.
     # Use two full healthy calendar days in the current verified CPA regime;
     # older CPC reports and an unobserved cost cannot be treated as evidence.
@@ -124,7 +125,7 @@ def cpa_decision(current,data,now,last_change=None):
     return 'HOLD',None,'insufficient_scaling_evidence'
 
 
-def prepaid_delivery_window(previous,now,healthy,stats):
+def prepaid_delivery_window(previous,now,healthy,stats,global_stats=None):
     """Two complete Moscow days, excluding the transition day and today's partial day."""
     since=previous.get('delivery_probe_since') if previous.get('delivery_probe_policy_version')==1 else None
     if not since or not healthy:since=now.isoformat()
@@ -134,10 +135,21 @@ def prepaid_delivery_window(previous,now,healthy,stats):
     start=max(first,today-timedelta(days=2))
     rows=[r for r in stats if start.isoformat()<=r['Date']<today.isoformat()]
     impressions=sum(r['Impressions'] for r in rows);clicks=sum(r['Clicks'] for r in rows)
+    cost=sum(Decimal(str(r.get('Cost',0))) for r in rows)
+    total_rows=[r for r in (global_stats or []) if start.isoformat()<=r['Date']<today.isoformat()]
+    total_impressions=sum(r['Impressions'] for r in total_rows) if global_stats is not None else None
+    average=total_impressions/2 if total_impressions is not None and days>=2 else None
+    # Historical CPC spend never vetoes a currently unbilled paid-only probe.
+    # The global target is a delivery diagnostic, not proof of relevance/profit.
+    underdelivery=(average<RELEVANT_IMPRESSIONS_TARGET_PER_DAY if average is not None
+                   else impressions<100 and clicks<10)
     return {'delivery_probe_policy_version':1,'delivery_probe_since':since,
             'complete_days':days,'window_start':start.isoformat(),'window_end_exclusive':today.isoformat(),
-            'impressions':impressions,'clicks':clicks,
-            'ready':bool(healthy and days>=2 and impressions<100 and clicks<10)}
+            'impressions':impressions,'clicks':clicks,'spend_rub':float(cost),
+            'global_impressions_average_day':average,'global_target_day':RELEVANT_IMPRESSIONS_TARGET_PER_DAY,
+            'relevance_status':'TARGETING_AND_QUERY_REVIEW_SEPARATE',
+            'current_regime_unbilled':bool(days>=2 and cost==0),
+            'ready':bool(healthy and days>=2 and cost==0 and underdelivery)}
 
 
 def economics(rows, ad_spend, clicks, impressions, costs):
@@ -786,6 +798,8 @@ class Controller:
         await self.actual_returns(c,cost_start)
         pause=bool(await self.state(c,'cpa_owner_paused'))
         summary=[]
+        campaign_stats={cid:await self.report(start,today,campaign_id=cid) for cid in CPA_CAMPAIGNS}
+        all_stats=[r for rows in campaign_stats.values() for r in rows]
         for campaign in campaigns:
             cid=campaign['Id'];side=CPA_CAMPAIGNS[cid];opposite='Network' if side=='Search' else 'Search'
             strategy=campaign['UnifiedCampaign']['BiddingStrategy'];pay=strategy.get(side,{}).get('PayForConversion',{})
@@ -795,7 +809,7 @@ class Controller:
                 and campaign['UnifiedCampaign'].get('CounterIds',{}).get('Items')==[112544007])
             last=await c.fetchval("SELECT max(created_at) FROM profit_cpa_actions WHERE campaign_id=$1 AND state='applied' AND action='SET'",cid)
             unresolved=await c.fetchval("SELECT EXISTS(SELECT 1 FROM profit_cpa_actions WHERE campaign_id=$1 AND state IN ('prepared','unknown'))",cid)
-            stats=await self.report(start,today,campaign_id=cid)
+            stats=campaign_stats[cid]
             if side == 'Search':
                 # The live loop uses cpa_monitor, not the retired CPC hourly path.
                 # Reuse its Search report and isolate diagnostic failures from ads.
@@ -821,11 +835,12 @@ class Controller:
                     previous={**previous,'delivery_probe_policy_version':1,'delivery_probe_since':now.isoformat()}
             first=previous.get('first_observed_at',now.isoformat());observed=(now-datetime.fromisoformat(first)).total_seconds()/86400
             probe=prepaid_delivery_window(previous,now,verified and technical_paid_health(checks)
-                and campaign['State']=='ON' and campaign['Status']=='ACCEPTED' and not pause and not unresolved,stats)
+                and campaign['State']=='ON' and campaign['Status']=='ACCEPTED' and not pause and not unresolved,stats,all_stats)
             data={'paused':pause,'strategy_verified':verified,'balance':balance,'health':technical_paid_health(checks),
                 'economic_max':economic_max,'paid_7d':paid,'clicks_7d':clicks,'cac_paid':float(spend/paid) if paid else None,
                 'observed_days':observed,'delivery_limited':impressions<100,'attribution_complete':paid>=3 and checks['paid_delivery_proven'],
                 'prepaid_probe_ready':probe['ready'],'probe_economic_max':PREPAID_PROBE_CAP,
+                'current_regime_unbilled':probe['current_regime_unbilled'],
                 'demand_exists':demand.get('demand_exists') is True}
             state,target,reason=cpa_decision(current,data,now,last)
             emergency=(not verified or service.get('failures',0)>=2 or (cid==715029848 and not (await self.state(c,'rsya_continuation_applied')) and spend>=Decimal(900)))

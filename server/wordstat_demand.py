@@ -63,6 +63,27 @@ def coverage_proxy(demand, impressions, clicks, healthy):
         'interpretation': 'DEMAND COVERAGE PROXY; overlapping searches are not Direct inventory'}
 
 
+def recent_demand_evidence(state, today):
+    """Observed recent demand may permit a bounded probe, never fill provider gaps.
+
+    A three-day provider lag is explicitly different from a fresh daily series.
+    All configured clusters and their 30-day windows must actually be present.
+    """
+    clusters=state.get('clusters',[])
+    ids={x.get('cluster_id') for x in clusters}
+    expected={x[0] for x in CLUSTERS}
+    lags=[]
+    for x in clusters:
+        try: lag=(today-date.fromisoformat(x['latest_provider_date'])).days
+        except (KeyError,TypeError,ValueError): return False,'UNKNOWN'
+        if not 0<=lag<=3 or x.get('avg7') is None or x.get('avg30') is None:
+            return False,'STALE_OR_INCOMPLETE'
+        lags.append(lag)
+    if ids!=expected or len(clusters)!=len(expected):return False,'INCOMPLETE_CLUSTERS'
+    exists=any(x['avg7']>0 for x in clusters)
+    return exists,('RECENT_OBSERVED_PROVIDER_LAG' if max(lags)>1 else 'FRESH_OBSERVED') if exists else 'OBSERVED_NO_DEMAND'
+
+
 def cluster_for_term(term):
     """Exclusive representative intent, never infer a query from a landing visit."""
     term = re.sub(r'[^а-яa-z0-9 ]', ' ', str(term or '').lower().replace('ё', 'е'))
@@ -153,6 +174,10 @@ async def sync(controller, c, now):
                 rows=await c.fetch('SELECT observed_date,query_count FROM profit_wordstat_history WHERE cluster_id=$1',cluster['cluster_id'])
                 cluster.update(demand_metrics({str(x['observed_date']):x['query_count'] for x in rows},today))
             await controller.put(c,'wordstat_demand',previous)
+        previous['demand_exists'],previous['demand_evidence']=recent_demand_evidence(previous,today)
+        previous['shared_global_provider_calls_cap']=wordstat_cache.MAX_PROVIDER_CALLS_PER_MSK_DAY
+        previous['request_cost_status']='ESTIMATED_NOT_INVOICED'
+        await controller.put(c,'wordstat_demand',previous)
         return previous
     state = {'attempt_date': today.isoformat(), 'checked_at': now.isoformat(),
         'state': 'WORDSTAT_DATA_DEGRADED', 'mode': 'DRY_RUN', 'schema_version':1, 'clusters': [],
@@ -196,6 +221,8 @@ async def sync(controller, c, now):
             break  # No response/secret/contacts are logged.
     if len(state['clusters']) == len(CLUSTERS) and all(x['complete'] for x in state['clusters']):
         state['state'] = 'FRESH'
-    state['demand_exists'] = state['state']=='FRESH' and any((x['avg7'] or 0)>0 for x in state['clusters'])
+    state['demand_exists'],state['demand_evidence']=recent_demand_evidence(state,today)
+    state['shared_global_provider_calls_cap']=wordstat_cache.MAX_PROVIDER_CALLS_PER_MSK_DAY
+    state['request_cost_status']='ESTIMATED_NOT_INVOICED'
     await controller.put(c, 'wordstat_demand', state)
     return state

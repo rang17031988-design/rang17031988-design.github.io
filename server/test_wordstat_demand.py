@@ -4,6 +4,19 @@ from datetime import date,timedelta,datetime,timezone
 from wordstat_demand import normalized_history,demand_metrics,coverage_proxy,cluster_for_term,joined_metrics
 
 class DemandTests(unittest.TestCase):
+    def test_recent_lag_permits_only_observed_demand_without_filling_gaps(self):
+        from wordstat_demand import recent_demand_evidence,CLUSTERS
+        today=date(2026,10,6)
+        clusters=[{'cluster_id':c[0],'latest_provider_date':'2026-10-03',
+                   'avg7':10,'avg30':12,'wordstat_yesterday':None,'complete':False} for c in CLUSTERS]
+        state={'clusters':clusters,'state':'WORDSTAT_DATA_DEGRADED'}
+        self.assertEqual(recent_demand_evidence(state,today),(True,'RECENT_OBSERVED_PROVIDER_LAG'))
+        self.assertTrue(all(x['wordstat_yesterday'] is None for x in clusters))
+        self.assertEqual(state['state'],'WORDSTAT_DATA_DEGRADED')
+        self.assertFalse(recent_demand_evidence(state,today+timedelta(days=1))[0])
+        self.assertFalse(recent_demand_evidence({'clusters':clusters[:-1]},today)[0])
+        clusters[0]['avg30']=None
+        self.assertFalse(recent_demand_evidence(state,today)[0])
     def test_provider_labels_are_not_timezone_shifted(self):
         self.assertEqual(normalized_history({'results':[{'date':'2026-10-02T00:00:00Z','count':'9'}]}),{'2026-10-02':9})
     def test_missing_day_is_unknown_not_zero(self):
