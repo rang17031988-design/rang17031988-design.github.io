@@ -1,4 +1,4 @@
-from product_catalog import read_catalog
+from product_catalog import read_catalog, COGS_UNIT_RUB
 """Own-campaign controller. Provider approval and live-write switch are separate gates.
 
 API contracts: official Direct Reports, KeywordBids and Campaigns services.
@@ -17,7 +17,6 @@ LOCK = 714566814
 CPA_CAMPAIGNS={714566814:'Search',715029848:'Network'}
 CPA_MIN,CPA_MAX,CPA_STEP=Decimal(100),Decimal(350),Decimal(25)
 PAID_GOAL=666936854
-COGS_UNIT_RUB = 230  # Handle, packaging, handling and labor included; owner confirmed.
 
 
 def value_json(v):
@@ -232,6 +231,16 @@ class Controller:
             UPDATE commerce_pending_orders SET is_test=TRUE,is_internal=TRUE,traffic_class='internal_test'
                 WHERE order_number IN (1008,1009,1010,1011,1012) AND traffic_class='customer';
         ''')
+        # The existing state table is the shared read source for n8n economics.
+        # Unknown provider costs remain in profit_controller_costs as NULL.
+        await c.execute('''INSERT INTO profit_controller_state(key,value)
+            VALUES('economics_config',$1::jsonb)
+            ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()
+            WHERE profit_controller_state.value IS DISTINCT FROM EXCLUDED.value''',
+            json.dumps({'cogs_unit_rub':COGS_UNIT_RUB,'cogs_state':'CONFIRMED',
+                        'cogs_source':'owner_confirmed_includes_pack_handling_labor',
+                        'managerial_tax_rate':0.06,'tax_model_state':'ESTIMATED',
+                        'unknown_cost_policy':'NULL_NOT_ZERO'}))
 
     async def state(self, c, key):
         data = await c.fetchval('SELECT value FROM profit_controller_state WHERE key=$1', key)

@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import profit_presentation as presentation
 import traffic_attribution
+from product_catalog import COGS_UNIT_RUB
 
 MSK = ZoneInfo('Europe/Moscow')
 UTC = timezone.utc
@@ -250,7 +251,7 @@ def video_summary(groups):
 
 def money(rows, ad_spend, dispositions):
     """Never interprets returned condition, combined costs or no attribution as zero."""
-    cogs = Decimal(230)
+    cogs = Decimal(COGS_UNIT_RUB)
     order_ids={r['order_id'] for r in rows}
     dispositions={k:v for k,v in dispositions.items() if k in order_ids}
     stats={k:{'orders':0,'units':0,'rub':Decimal(0)} for k in ('ORDERED','PAID','IN_TRANSIT','READY','RECEIVED','CANCELLED','NOT_PICKED_UP','RETURNED_RESELLABLE','RETURNED_DAMAGED')}
@@ -297,7 +298,7 @@ def money(rows, ad_spend, dispositions):
         if d.get('condition') not in ('resellable','damaged'):loss=None
         if loss is not None and d.get('condition')=='damaged':loss+=r['quantity']*230
         not_picked.append({'order_id':r['order_id'],'loss_rub':loss,'known_non_ad_costs_rub':known_costs,'attributed_ad_cost':d.get('attributed_ad_cost'),'condition':d.get('condition') or 'UNKNOWN'})
-    return {'statuses':{k:{**v,'rub':float(v['rub'])} for k,v in stats.items()},'cogs_unit':230,
+    return {'statuses':{k:{**v,'rub':float(v['rub'])} for k,v in stats.items()},'cogs_unit':COGS_UNIT_RUB,
             'cogs_received':float(cogs_received),'tax_received':float(tax),'writeoff':float(writeoff),
             'yookassa_actual':total(fees),'ozon_outbound_actual':total(outbound),'ozon_return_actual':rr,
             'extra_confirmed':extras,'advertising':float(ad_spend),'profit_before_unknown':float(before),

@@ -5,6 +5,7 @@ PRODUCT_ID=1825508753
 VARIANT_ID=2184195121
 CATALOG_URL='https://xn--163-5cdt3dgrs.xn--p1ai/product/ruchka-dlya-skovorody-semnaya.json'
 PRODUCT_NAME='Оригинальная универсальная съёмная ручка для сковородок'
+COGS_UNIT_RUB = 230  # Owner confirmed: product, packaging, handling and labor.
 
 async def read_catalog(client):
     response=await client.get(CATALOG_URL,timeout=20)
