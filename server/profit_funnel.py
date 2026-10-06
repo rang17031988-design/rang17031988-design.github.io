@@ -21,6 +21,7 @@ import httpx
 import profit_presentation as presentation
 import traffic_attribution
 import posting_controls
+import wordstat_demand
 from product_catalog import COGS_UNIT_RUB
 
 MSK = ZoneInfo('Europe/Moscow')
@@ -522,7 +523,7 @@ class ProfitFunnel:
                 dispositions.setdefault(ret['order_id'],{})['has_return']=True
             stock=await self.controller.stock(c,now)
             cpa=await self.controller.state(c,'cpa_monitor') or {}
-            demand=await self.controller.state(c,'wordstat_demand') or {}
+            demand=wordstat_demand.report_window(await self.controller.state(c,'wordstat_demand') or {},start,end)
             # Physical inspection alone may mark a returned item resellable/damaged.
             stock['confirmed_resellable_return_units']=sum(r['quantity'] for r in rows if dispositions.get(r['order_id'],{}).get('condition')=='resellable')
             # Native stock already includes its real stock events; never deduct PAID or add returns twice.

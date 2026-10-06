@@ -119,6 +119,22 @@ def query_summary(rows, start, end):
         'automatic_semantic_writes':False}
 
 
+def report_window(demand, start, end):
+    """Do not reuse cached joined traffic from another report period."""
+    result = copy.deepcopy(demand)
+    matching = True
+    for cluster in result.get('clusters', []):
+        observed = cluster.get('observed_window') or {}
+        if observed.get('start') == start.isoformat() and observed.get('end_exclusive') == end.isoformat():
+            continue
+        matching = False
+        cluster.update(joined=None, coverage_proxy=None, coverage_status='UNKNOWN',
+                       opportunity_score=None, confidence='REPORT_WINDOW_UNAVAILABLE')
+    result['report_window'] = {'start': start.isoformat(), 'end_exclusive': end.isoformat(),
+                               'cached_join_matches': matching}
+    return result
+
+
 def joined_metrics(demand, direct, sessions, orders, start, end, healthy=False):
     """Join an explicit observed window. This function cannot write ads or goals.
 

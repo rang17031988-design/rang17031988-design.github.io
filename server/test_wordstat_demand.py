@@ -98,6 +98,30 @@ class RuntimeJoinTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('await self.join_wordstat(c, demand, stats, cost_start, now, checks)', source)
         self.assertIn("if side == 'Search':", source)
 
+class ReportWindowTests(unittest.TestCase):
+    def test_other_period_does_not_reuse_paid_or_coverage_and_keeps_history(self):
+        from wordstat_demand import report_window
+        start=datetime(2026,10,6,tzinfo=timezone.utc);end=start+timedelta(days=1)
+        source={'clusters':[{'avg7':9,'average_window_end':'2026-10-03',
+            'joined':{'verified_paid':3},'coverage_proxy':.5,'opportunity_score':8,
+            'observed_window':{'start':'2026-09-30','end_exclusive':'2026-10-06'}}]}
+        out=report_window(source,start,end)
+        self.assertIsNone(out['clusters'][0]['joined'])
+        self.assertIsNone(out['clusters'][0]['coverage_proxy'])
+        self.assertEqual(out['clusters'][0]['avg7'],9)
+        self.assertEqual(source['clusters'][0]['joined']['verified_paid'],3)
+        self.assertFalse(out['report_window']['cached_join_matches'])
+
+    def test_exact_period_retains_confirmed_join(self):
+        from wordstat_demand import report_window
+        start=datetime(2026,10,6,tzinfo=timezone.utc);end=start+timedelta(days=1)
+        source={'clusters':[{'joined':{'verified_paid':3},'observed_window':{
+            'start':start.isoformat(),'end_exclusive':end.isoformat()}}]}
+        out=report_window(source,start,end)
+        self.assertEqual(out['clusters'][0]['joined']['verified_paid'],3)
+        self.assertTrue(out['report_window']['cached_join_matches'])
+
+
 class ActualQueryTests(unittest.IsolatedAsyncioTestCase):
     def test_actual_queries_do_not_inherit_keyword_paid_or_unrelated_intent(self):
         from wordstat_demand import query_summary
