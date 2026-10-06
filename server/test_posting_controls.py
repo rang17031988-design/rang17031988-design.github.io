@@ -6,6 +6,35 @@ from unittest.mock import patch
 
 
 class PostingControlsTests(unittest.IsolatedAsyncioTestCase):
+    def test_metrics_low_sample_and_unknown_costs_never_recommend_expansion(self):
+        row={'sessions':19,'paid':3,'unknown_cost_orders':0,'contribution':400}
+        self.assertIn('LOW SAMPLE',posting_controls.metric_decision(row))
+        row.update(sessions=20,paid=2)
+        self.assertIn('LOW SAMPLE',posting_controls.metric_decision(row))
+        row.update(paid=3,unknown_cost_orders=1,contribution=None)
+        self.assertIn('UNKNOWN',posting_controls.metric_decision(row))
+        row.update(unknown_cost_orders=0,contribution=-25)
+        self.assertIn('не расширять',posting_controls.metric_decision(row))
+        row.update(contribution=25)
+        self.assertIn('ручного анализа',posting_controls.metric_decision(row))
+
+    async def test_metrics_without_success_cannot_claim_traffic_or_optimization(self):
+        c=AsyncMock();c.fetchval.return_value=True;c.fetch.return_value=[]
+        result=await posting_controls.metrics_report(c)
+        self.assertIn('WAITING_FIRST_SUCCESS',result)
+        self.assertIn('оптимизация запрещена',result)
+        c.execute.assert_not_awaited()
+
+    async def test_metrics_keeps_negative_and_unknown_contribution_visible(self):
+        c=AsyncMock();c.fetchval.return_value=True
+        c.fetch.return_value=[{'username':'real_group','sessions':22,'buy':4,'checkout':3,
+          'paid':3,'revenue':3600,'unknown_cost_orders':0,'contribution':-230},
+          {'username':'unknown_group','sessions':22,'buy':4,'checkout':3,
+          'paid':3,'revenue':3600,'unknown_cost_orders':1,'contribution':None}]
+        result=await posting_controls.metrics_report(c)
+        self.assertIn('-230.00 ₽',result);self.assertIn('вклад UNKNOWN',result)
+        c.execute.assert_not_awaited()
+
     async def test_control_command_advances_offset_so_it_is_not_replayed(self):
         c=AsyncMock();acquire=AsyncMock();acquire.__aenter__.return_value=c
         pool=MagicMock();pool.acquire.return_value=acquire
