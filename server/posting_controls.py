@@ -27,7 +27,7 @@ async def handle(connection, command, text):
             WHERE id='handles_media' RETURNING id""", json.dumps(paused))
         if not changed:
             return 'Проект внешнего агента не найден. Изменения не внесены.'
-        return ('Внешний агент приостановлен. Новые резервации и отправки запрещены. Уже отправленный запрос Telegram отменить нельзя.' if paused else
+        return ('Внешний агент приостановлен. Новый выбор групп и новые резервации запрещены. Уже зарезервированная или начатая отправка может завершиться; повторять её нельзя.' if paused else
                 'Ручная пауза внешнего агента снята. Workflow не активируется этой командой; правила, blacklist и защита от дублей сохранены.')
     if command == 'posting_blacklist':
         try:
