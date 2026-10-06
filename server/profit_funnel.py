@@ -706,7 +706,7 @@ class ProfitFunnel:
                             await self.controller.put(c,'cpa_owner_paused',command=='cpa_pause')
                             await self.controller.put(c,'cpa_monitor',{})
                         await self.send('command:'+str(update['update_id']),
-                            '🤖 CPA Agent приостановлен владельцем.' if command=='cpa_pause' else '🤖 CPA Agent возобновлён. Проверки, границы 100–350 ₽ и cooldown сохранены. Остановленные рекламные кампании автоматически не запускаются.')
+                            '🤖 CPA Agent приостановлен владельцем.' if command=='cpa_pause' else '🤖 CPA Agent возобновлён. Проверки, границы 200–350 ₽ и cooldown сохранены. Остановленные рекламные кампании автоматически не запускаются.')
                         continue
                     if period not in reports:reports[period]=await self.report(period)
                     r=reports[period]
