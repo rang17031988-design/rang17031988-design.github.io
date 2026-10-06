@@ -376,7 +376,7 @@ def render(r,command,worker=None):
     elif command=='errors':lines=errors(r)
     elif command=='status':lines=system(r,worker)+['',SEP]+customer_operations(r)
     elif command=='cpa':
-        monitor=r.get('cpa_controller',{});lines=['🤖 CPA-КОНТРОЛЛЕР','Границы: 100–350 ₽ • шаг 25 ₽','Проверка: 1 час • решение: 6 часов • изменение: 24 часа','Пополнение и изменение бюджетов запрещены.']
+        monitor=r.get('cpa_controller',{});lines=['🤖 CPA-КОНТРОЛЛЕР',f"Границы: {monitor.get('min_cpa',200)}–{monitor.get('max_cpa',350)} ₽ • шаг {monitor.get('step',25)} ₽",'Проверка: 1 час • решение: 6 часов • изменение: 24 часа','Пополнение и изменение бюджетов запрещены.']
         for x in monitor.get('campaigns',[]):
             lines+=['',SEP,x['channel'], 'Текущий CPA: '+rub(x['current_cpa']),
                     'Оплаты 24ч / 7д: '+str(x['paid_24h'])+' / '+str(x['paid_7d']),
