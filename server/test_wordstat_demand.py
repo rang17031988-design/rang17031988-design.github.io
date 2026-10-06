@@ -76,6 +76,7 @@ class RuntimeJoinTests(unittest.IsolatedAsyncioTestCase):
         from profit_controller import Controller
         controller = Controller.__new__(Controller)
         controller.put = AsyncMock()
+        controller.search_query_observation = AsyncMock(return_value={'state':'WAITING_PROVIDER'})
         controller.order_cohort = AsyncMock(return_value=[])
         connection = AsyncMock()
         connection.fetch.return_value = []
@@ -96,3 +97,43 @@ class RuntimeJoinTests(unittest.IsolatedAsyncioTestCase):
         source = inspect.getsource(Controller.cpa_monitor)
         self.assertIn('await self.join_wordstat(c, demand, stats, cost_start, now, checks)', source)
         self.assertIn("if side == 'Search':", source)
+
+class ActualQueryTests(unittest.IsolatedAsyncioTestCase):
+    def test_actual_queries_do_not_inherit_keyword_paid_or_unrelated_intent(self):
+        from wordstat_demand import query_summary
+        rows=[{'Query':q,'Clicks':1,'Impressions':2,'Cost':3} for q in
+              ['купить отвертки ручка','запасные части для перьевой ручки паркер',
+               'ухват для банок','купить ручку для сковороды','сковорододержатель']]
+        out=query_summary(rows,date(2026,9,30),date(2026,10,6))
+        self.assertEqual(out['clusters']['unassigned']['clicks'],3)
+        self.assertEqual(out['clusters']['buy']['clicks'],1)
+        self.assertEqual(out['clusters']['holder']['clicks'],1)
+        self.assertIsNone(out['query_paid']);self.assertIsNone(out['organic_queries'])
+        self.assertFalse(out['automatic_semantic_writes'])
+
+    async def test_pending_report_resumes_same_window_and_preserves_last_observed(self):
+        from profit_controller import Controller,DirectError
+        controller=Controller.__new__(Controller)
+        controller.state=AsyncMock(return_value={'state':'OBSERVED','window_start':'2026-09-29'})
+        controller.put=AsyncMock();controller.report=AsyncMock(side_effect=DirectError('report_pending',30,'safe-request-id'))
+        start=datetime(2026,9,30,tzinfo=timezone.utc);now=datetime(2026,10,6,tzinfo=timezone.utc)
+        out=await controller.search_query_observation(None,start,now)
+        self.assertEqual(out['state'],'WAITING_PROVIDER');self.assertEqual(out['retry_in'],30)
+        self.assertEqual(out['last_observed']['state'],'OBSERVED')
+        controller.state.return_value=out
+        await controller.search_query_observation(None,start,now+timedelta(seconds=20))
+        self.assertEqual(controller.report.await_count,1)
+        controller.report.side_effect=None;controller.report.return_value=[]
+        result=await controller.search_query_observation(None,start,now+timedelta(seconds=31))
+        self.assertEqual(result['state'],'OBSERVED')
+        self.assertEqual(controller.report.await_args_list[0],controller.report.await_args_list[1])
+
+    async def test_offline_headers_are_retained_without_response_body(self):
+        import httpx
+        from profit_controller import Controller,DirectError
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r:httpx.Response(202,headers={'retryIn':'17','RequestId':'id'},text='private'))) as client:
+            c=Controller(None,client);c.headers=lambda:{}
+            with self.assertRaises(DirectError) as caught:await c.report(date(2026,9,30),date(2026,10,6),query=True)
+            self.assertEqual(caught.exception.retry_in,17)
+            self.assertEqual(caught.exception.request_id,'id')
+            self.assertNotIn('private',str(caught.exception))

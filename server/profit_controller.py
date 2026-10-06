@@ -203,8 +203,9 @@ def economics(rows, ad_spend, clicks, impressions, costs):
 
 
 class DirectError(Exception):
-    def __init__(self, code):
+    def __init__(self, code, retry_in=None, request_id=None):
         self.code = str(code)
+        self.retry_in, self.request_id = retry_in, request_id
         super().__init__('Direct API unavailable: ' + self.code)
 
 
@@ -294,7 +295,10 @@ class Controller:
         headers = {**self.headers(), 'processingMode':'auto', 'returnMoneyInMicros':'false',
                    'skipReportHeader':'true','skipReportSummary':'true'}
         r = await self.http.post('https://api.direct.yandex.com/json/v501/reports', headers=headers, json={'params': spec})
-        if r.status_code in (201,202): raise DirectError('report_pending')
+        if r.status_code in (201,202):
+            try: retry_in = max(1,int(r.headers.get('retryIn','60')))
+            except ValueError: retry_in = 60
+            raise DirectError('report_pending',retry_in,r.headers.get('RequestId'))
         if r.status_code != 200: raise DirectError('report_http_' + str(r.status_code))
         reader = csv.DictReader(io.StringIO(r.text), delimiter='\t')
         if not reader.fieldnames or not set(fields).issubset(reader.fieldnames):
@@ -881,11 +885,39 @@ class Controller:
             orders = await self.order_cohort(c, start, now)
             joined = wordstat_demand.joined_metrics(demand, stats, sessions, orders, start, now,
                 healthy=technical_paid_health(checks))
+            # Offline Reports completion is diagnostic only, isolated from CPA.
+            query_state = await self.search_query_observation(c,start,now)
+            joined['actual_search_queries'] = query_state
             await self.put(c, 'wordstat_demand', joined)
             await self.put(c, 'wordstat_join_health', {'state': 'OBSERVED', 'joined_at': joined['joined_at']})
         except Exception as exc:
             await self.put(c, 'wordstat_join_health', {'state': 'DRY_RUN', 'error': type(exc).__name__,
                 'checked_at': now.isoformat()})
+
+    async def search_query_observation(self,c,start,now):
+        day_start,day_end=start.astimezone(MOSCOW).date(),now.astimezone(MOSCOW).date()
+        window={'window_start':day_start.isoformat(),'window_end_inclusive':day_end.isoformat()}
+        previous=await self.state(c,'actual_search_queries') or {}
+        same=all(previous.get(k)==v for k,v in window.items())
+        try:
+            due=datetime.fromisoformat(previous['next_check_at'])
+            if same and now<due:return previous
+        except (KeyError,ValueError,TypeError):pass
+        try:
+            rows=await self.report(day_start,day_end,query=True)
+            result=wordstat_demand.query_summary(rows,day_start,day_end)
+            result.update(checked_at=now.isoformat(),next_check_at=(now+timedelta(hours=1)).isoformat())
+        except Exception as exc:
+            pending=getattr(exc,'code',None)=='report_pending'
+            delay=getattr(exc,'retry_in',None) or 3600
+            result={**window,'state':'WAITING_PROVIDER' if pending else 'UNAVAILABLE',
+                'checked_at':now.isoformat(),'next_check_at':(now+timedelta(seconds=delay)).isoformat(),
+                'error':getattr(exc,'code',type(exc).__name__),
+                'request_id':getattr(exc,'request_id',None),'retry_in':delay,
+                'last_observed':previous if previous.get('state')=='OBSERVED' else previous.get('last_observed'),
+                'automatic_semantic_writes':False}
+        await self.put(c,'actual_search_queries',result)
+        return result
 
     async def loop(self):
         while True:

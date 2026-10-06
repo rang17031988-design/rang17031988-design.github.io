@@ -95,6 +95,30 @@ def cluster_for_term(term):
     return None
 
 
+def query_summary(rows, start, end):
+    """Actual queries are distinct from targeted keywords and attribution UTMs.
+
+    Do not transfer keyword-attributed payments to a guessed search query.
+    Unclear intent stays unassigned; cookware words alone do not prove intent.
+    """
+    buckets = {cid: {'impressions':0, 'clicks':0, 'spend_rub':0., 'examples':[]} for cid, *_ in CLUSTERS}
+    buckets['unassigned'] = {'impressions':0, 'clicks':0, 'spend_rub':0., 'examples':[]}
+    for row in rows:
+        term = str(row.get('Query') or '').lower().replace('ё','е')
+        unrelated = re.search(r'отверт|чемодан|перьев|шариков|паркер|писать|двер|мебел|банок',term)
+        relevant = re.search(r'сковород|сковорододержател|чапельник',term)
+        cid = cluster_for_term(term) if relevant and not unrelated else None
+        item = buckets[cid or 'unassigned']
+        for dest,key in (('impressions','Impressions'),('clicks','Clicks'),('spend_rub','Cost')):
+            item[dest] += row[key]
+        if len(item['examples'])<5 and term not in item['examples']:item['examples'].append(term)
+    return {'state':'OBSERVED','basis':'ACTUAL_SEARCH_QUERY','window_start':start.isoformat(),
+        'window_end_inclusive':end.isoformat(),'rows':len(rows),'clusters':buckets,
+        'query_paid':None,'query_paid_reason':'UTM keyword is not the actual search query; no verified query-level linkage',
+        'organic_queries':None,'organic_reason':'Not available; never inferred from visits',
+        'automatic_semantic_writes':False}
+
+
 def joined_metrics(demand, direct, sessions, orders, start, end, healthy=False):
     """Join an explicit observed window. This function cannot write ads or goals.
 
@@ -161,6 +185,7 @@ def joined_metrics(demand, direct, sessions, orders, start, end, healthy=False):
         cluster.update(missing_score_inputs=missing, opportunity_score=None,
             confidence='LOW_SAMPLE' if visits < 20 else 'INSUFFICIENT_CONFIRMED_INPUTS', action='RECOMMEND_ONLY')
     result.update(joined_at=end.isoformat(), joined_unassigned=unassigned, mode='DRY_RUN',
+        direct_join_basis='TARGETED_KEYWORD_AND_ATTRIBUTION_UTM_NOT_ACTUAL_QUERY',
         score_reason='Score withheld until fresh aligned demand, conversion, margin and landing evidence are confirmed')
     return result
 
