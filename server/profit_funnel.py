@@ -20,11 +20,12 @@ from zoneinfo import ZoneInfo
 import httpx
 import profit_presentation as presentation
 import traffic_attribution
+import posting_controls
 from product_catalog import COGS_UNIT_RUB
 
 MSK = ZoneInfo('Europe/Moscow')
 UTC = timezone.utc
-COMMANDS = 'today yesterday week funnel organic devices browsers speed ads profit orders returns stock errors status cpa cpa_pause cpa_resume'.split()
+COMMANDS = 'today yesterday week funnel organic devices browsers speed ads profit orders returns stock errors status cpa cpa_pause cpa_resume'.split() + posting_controls.COMMANDS
 CLIENT_EVENTS = set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
 STAGES = 'SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CHECKOUT_OPEN CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_LOADED PVZ_SELECTED PAYMENT_STARTED PAYMENT_SUCCESS ORDER_RECEIVED'.split()
 ATTR_KEYS = 'yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()
@@ -701,12 +702,21 @@ class ProfitFunnel:
                     if command in ('start','menu'):command='menu'
                     if command in ('today','yesterday','week'):period=command
                 if command in COMMANDS+['menu','behavior','attention','debug','debug_last']:
+                    if command in posting_controls.COMMANDS:
+                        async with self.pool.acquire() as c:
+                            response=await posting_controls.handle(c,command,update.get('message',{}).get('text',''))
+                        await self.send('command:'+str(update['update_id']),response)
+                        async with self.pool.acquire() as c:
+                            await self.put(c,'telegram_offset',{'value':update['update_id']+1})
+                        continue
                     if command in ('cpa_pause','cpa_resume'):
                         async with self.pool.acquire() as c:
                             await self.controller.put(c,'cpa_owner_paused',command=='cpa_pause')
                             await self.controller.put(c,'cpa_monitor',{})
                         await self.send('command:'+str(update['update_id']),
                             '🤖 CPA Agent приостановлен владельцем.' if command=='cpa_pause' else '🤖 CPA Agent возобновлён. Проверки, границы 200–350 ₽ и cooldown сохранены. Остановленные рекламные кампании автоматически не запускаются.')
+                        async with self.pool.acquire() as c:
+                            await self.put(c,'telegram_offset',{'value':update['update_id']+1})
                         continue
                     if period not in reports:reports[period]=await self.report(period)
                     r=reports[period]
