@@ -126,7 +126,9 @@ async def sync(c):
     rows=await c.fetch('''SELECT p.* FROM commerce_pending_orders p WHERE order_id IS NOT NULL
        AND NOT is_test AND NOT is_internal AND EXISTS(
          SELECT 1 FROM profit_funnel_sessions s JOIN cps_touches t ON t.session_id=s.session_id
-         WHERE s.checkout_session_id=p.session_id)''')
+         WHERE s.checkout_session_id=p.session_id OR
+           (NULLIF(s.attribution->>'client_id','') IS NOT NULL AND
+            s.attribution->>'client_id'=p.snapshot->'attribution'->>'client_id'))''')
     for raw in rows:
         row=dict(raw)
         async with c.transaction():
@@ -134,8 +136,10 @@ async def sync(c):
             touches=await c.fetch('''SELECT t.touch_id,t.source_id,t.clicked_at AS at,r.affiliate_id,r.offer_version
               FROM cps_touches t JOIN cps_sources r USING(source_id)
               JOIN profit_funnel_sessions s ON s.session_id=t.session_id
-              WHERE s.checkout_session_id=$1 AND NOT s.is_internal AND NOT s.is_test
-              AND r.status='ACTIVE' AND r.offer_version=$2 ''',row['session_id'],POLICY['version'])
+              WHERE (s.checkout_session_id=$1 OR
+                  (NULLIF(s.attribution->>'client_id','') IS NOT NULL AND s.attribution->>'client_id'=$3))
+              AND NOT s.is_internal AND NOT s.is_test
+              AND r.status='ACTIVE' AND r.offer_version=$2 ''',row['session_id'],POLICY['version'],obj(row['snapshot']).get('attribution',{}).get('client_id'))
             chosen=choose_touch([dict(t) for t in touches],row['created_at'])
             if not chosen:continue
             old=await c.fetchrow('SELECT * FROM cps_order_credit WHERE order_id=$1 AND offer_version=$2 FOR UPDATE',row['order_id'],POLICY['version'])
