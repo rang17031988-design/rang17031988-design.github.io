@@ -622,13 +622,16 @@ class ProfitFunnel:
         result={'days':len(baseline),'eligible_days':len(eligible),'quality':'LOW SAMPLE','yesterday':baseline[-1].get('instrumented_funnel',{}).get('counts') if baseline else None}
         if len(eligible)<3:return result
         result['quality']='CONFIRMED'
-            result['seven_day_average']={k:statistics.mean(r['instrumented_funnel']['counts'][k] for r in eligible)
-                if all(k in r['instrumented_funnel']['counts'] for r in eligible) else None for k in STAGES}
+        result['seven_day_average']={k:statistics.mean(r['instrumented_funnel']['counts'][k] for r in eligible)
+            if all(k in r['instrumented_funnel']['counts'] for r in eligible) else None for k in STAGES}
         result['seven_day_duration_mean']=statistics.mean(r['instrumented_funnel']['duration']['mean'] for r in eligible if r['instrumented_funnel']['duration']['mean'] is not None) if any(r['instrumented_funnel']['duration']['mean'] is not None for r in eligible) else None
         result['seven_day_ads']={channel:{metric:statistics.mean(r['ads'].get('channels',{}).get(channel,{}).get(metric,0) for r in eligible if r['ads'].get('quality')=='CONFIRMED') if any(r['ads'].get('quality')=='CONFIRMED' for r in eligible) else None for metric in ('impressions','clicks','spend')} for channel in ('YANDEX_SEARCH','YANDEX_RSYA')}
         result['drop_comparison']=[]
         for current_drop in current['instrumented_funnel']['drops']:
-            old=[next(x for x in r['instrumented_funnel']['drops'] if x['from']==current_drop['from']) for r in eligible]
+            old=[x for r in eligible for x in r['instrumented_funnel']['drops'] if x['from']==current_drop['from'] and x['to']==current_drop['to']]
+            if len(old)!=len(eligible):
+                result['drop_comparison'].append({'from':current_drop['from'],'to':current_drop['to'],'seven_day_percent':None,'difference_percentage_points':None})
+                continue
             starts=sum(x['start'] for x in old);lost=sum(x['lost'] for x in old)
             baseline_percent=ratio(lost,starts)
             result['drop_comparison'].append({'from':current_drop['from'],'to':current_drop['to'],'seven_day_percent':baseline_percent,
