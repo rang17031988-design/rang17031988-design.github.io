@@ -5,6 +5,14 @@ from unittest.mock import patch
 from profit_funnel import window,safe_client,device,channel,distribution,funnel,money,ProfitFunnel
 
 class ReportingTests(unittest.TestCase):
+    def test_cart_events_preserve_numeric_value_without_contact_fields(self):
+        for name in ('CART_OPEN','CART_QUANTITY_CHANGED'):
+            batch={'session_id':'a2c37719-6dc1-46bb-8b0b-6fa456fe3d45','events':[{
+                'event_id':'14917ffb-35d5-494e-a930-793df352ce61','name':name,
+                'value':2,'page':'cart','email':'private@example.com'}]}
+            result=safe_client(batch,'Android Mobile')
+            self.assertEqual(result['events'][0][3],{'value':2,'page':'cart'})
+
     def test_full_calendar_moscow(self):
         now=datetime(2026,10,3,22,0,tzinfo=timezone.utc)
         start,end=window('yesterday',now)
