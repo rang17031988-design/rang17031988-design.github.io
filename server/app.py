@@ -65,6 +65,18 @@ _funnel_worker = None
 _funnel_task = None
 _pvz_export_task = None
 
+@app.post('/api/internal/reviews/import')
+async def import_customer_review_media(request: Request, x_internal_key: str | None = Header(default=None)):
+    import hmac
+    from review_media import import_reviews
+    if not INTERNAL_KEY or not x_internal_key or not hmac.compare_digest(INTERNAL_KEY,x_internal_key):
+        raise HTTPException(403,'Forbidden')
+    if not db: raise HTTPException(503,'Storage unavailable')
+    try:
+        return await import_reviews(db,await request.json())
+    except ValueError as exc:
+        raise HTTPException(409,str(exc))
+
 def _safe_origin(url: str):
     p = urlsplit(url)
     return (p.scheme.lower(), p.hostname.lower() if p.hostname else "", p.port or (443 if p.scheme == "https" else 80))
