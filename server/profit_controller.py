@@ -85,7 +85,7 @@ def technical_paid_health(checks):
 
 
 def cpa_decision(current,data,now,last_change=None):
-    """Separate a bounded delivery probe from proven profitable scaling."""
+    """Only verified paid economics can justify profitable scaling."""
     current=Decimal(str(current))
     if not CPA_MIN<=current<=CPA_MAX:return 'REVIEW',None,'outside_owner_range'
     if data.get('paused'):return 'PAUSED',None,'owner_pause'
@@ -102,19 +102,9 @@ def cpa_decision(current,data,now,last_change=None):
     paid=data.get('paid_7d',0);clicks=data.get('clicks_7d',0)
     if clicks>=30 and paid==0 and not (data.get('prepaid_probe_ready') and data.get('current_regime_unbilled') is True):
         return 'HOLD',None,'traffic_without_verified_payments'
-    # Owner permits pre-PAID delivery discovery, not a claim of profitability.
-    # Use two full healthy calendar days in the current verified CPA regime;
-    # older CPC reports and an unobserved cost cannot be treated as evidence.
-    if paid==0 and data.get('prepaid_probe_ready'):
-        if not data.get('demand_exists'):return 'HOLD',None,'demand_unknown_or_absent'
-        if cap is None:
-            probe_cap=data.get('probe_economic_max')
-            if probe_cap is None:return 'HOLD',None,'economics_unknown'
-            cap=min(CPA_MAX,Decimal(str(probe_cap)))
-        target=min(CPA_MAX,current+CPA_STEP)
-        if target>current and target<=cap and Decimal(str(data['balance']))>=target:
-            return 'SET',target,'prepaid_delivery_probe'
-        return 'HOLD',None,'prepaid_probe_cap_or_balance'
+    # Owner policy 2026-10-07: quality/value/funnel before delivery scale.
+    # Missing impression volume and zero unbilled spend never justify a CPA raise.
+    if paid==0:return 'HOLD',None,'await_verified_paid_quality_before_scale'
     if cap is None:return 'HOLD',None,'economics_unknown'
     if paid>=3 and data.get('cac_paid') is not None and Decimal(str(data['cac_paid']))>cap:
         return ('SET',max(CPA_MIN,current-CPA_STEP),'cac_above_margin') if current>CPA_MIN else ('SUSPEND',None,'cac_above_margin_at_minimum')

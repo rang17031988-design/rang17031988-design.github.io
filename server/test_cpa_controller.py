@@ -37,33 +37,17 @@ class CPAGuards(unittest.TestCase):
         self.assertFalse(technical_paid_health({k:v for k,v in checks.items() if k!='payment_api'}))
         self.assertEqual(self.decision(economic_max=None,paid_7d=0,attribution_complete=False)[:2],('HOLD',None))
 
-    def test_prepaid_probe_requires_demand_and_confirmed_economics(self):
-        self.assertEqual(self.decision(economic_max=None,paid_7d=0,attribution_complete=False,
-            prepaid_probe_ready=True,demand_exists=True),('HOLD',None,'economics_unknown'))
-        self.assertEqual(self.decision(paid_7d=0,prepaid_probe_ready=True,demand_exists=True),
-            ('SET',Decimal(225),'prepaid_delivery_probe'))
-        self.assertEqual(self.decision(paid_7d=0,prepaid_probe_ready=True,demand_exists=False)[2],
-            'demand_unknown_or_absent')
-        self.assertEqual(self.decision(economic_max=None,paid_7d=1,prepaid_probe_ready=True)[0],'HOLD')
-        self.assertEqual(self.decision(350,economic_max=None,paid_7d=0,prepaid_probe_ready=True)[0],'HOLD')
-        self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,balance=210)[0],'HOLD')
-        self.assertEqual(self.decision(economic_max=210,paid_7d=0,prepaid_probe_ready=True)[:2],('HOLD',None))
-
-    def test_owner_managerial_probe_does_not_need_first_paid_or_fake_actual_cost(self):
-        self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,
-            demand_exists=True,probe_economic_max=350),('SET',Decimal(225),'prepaid_delivery_probe'))
-        self.assertEqual(self.decision(economic_max=None,paid_7d=0,prepaid_probe_ready=True,
-            demand_exists=False,probe_economic_max=350)[2],'demand_unknown_or_absent')
-        self.assertEqual(self.decision(economic_max=None,paid_7d=1,prepaid_probe_ready=True,
-            demand_exists=True,probe_economic_max=350)[2],'economics_unknown')
-
-    def test_old_cpc_clicks_do_not_deadlock_verified_unbilled_probe(self):
-        self.assertEqual(self.decision(economic_max=None,paid_7d=0,clicks_7d=60,
-            prepaid_probe_ready=True,current_regime_unbilled=True,demand_exists=True,
-            probe_economic_max=350),('SET',Decimal(225),'prepaid_delivery_probe'))
-        self.assertEqual(self.decision(economic_max=None,paid_7d=0,clicks_7d=60,
-            prepaid_probe_ready=True,current_regime_unbilled=False,demand_exists=True,
-            probe_economic_max=350)[2],'traffic_without_verified_payments')
+    def test_zero_paid_never_scales_for_delivery_target(self):
+        # Regression: even a ready/unbilled probe with low impressions must HOLD.
+        for current in (200,225,350):
+            for cap in (None,350):
+                for demand in (False,True):
+                    for clicks in (0,10,60):
+                        with self.subTest(current=current,cap=cap,demand=demand,clicks=clicks):
+                            result=self.decision(current,economic_max=cap,paid_7d=0,
+                                clicks_7d=clicks,prepaid_probe_ready=True,current_regime_unbilled=True,
+                                demand_exists=demand,probe_economic_max=350)
+                            self.assertEqual(result,('HOLD',None,'await_verified_paid_quality_before_scale'))
 
     def test_global_delivery_target_and_current_spend_guard(self):
         previous={'delivery_probe_policy_version':1,'delivery_probe_since':'2026-10-01T10:00:00+00:00'}
