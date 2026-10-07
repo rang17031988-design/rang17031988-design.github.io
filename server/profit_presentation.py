@@ -373,12 +373,12 @@ def render(r,command,worker=None):
             lines += ['',label+' • '+number(f['sessions'])+' сессий',
                 'Купить / checkout / PAID: '+' / '.join(number(f['counts'].get(k)) for k in ('BUY_BUTTON_CLICK','CHECKOUT_OPEN','PAYMENT_SUCCESS'))]
         for label,data in r.get('behavior_funnel',{}).items():
-            lines+=['',SEP,'👥 ПОВЕДЕНИЕ · '+label]
-            for k,title in [('visitors','Посетители'),('reviews','Открыли отзывы'),('photos','Фото отзывов'),('review_video','Видео отзывов'),('featured_video','Видео Кристины'),('product_video','Видео товара'),('description','Описание'),('buy','Купить'),('cart','Корзина'),('checkout','Checkout'),('paid','Подтверждённая оплата')]:
+            lines+=['',SEP,'👥 ПОВЕДЕНИЕ · '+label+' · '+data['quality']]
+            for k,title in [('visitors','Посетители'),('reviews_block','Увидели блок отзывов'),('reviews','Открыли отзывы'),('photos','Фото отзывов'),('review_video','Видео отзывов'),('featured','Отзыв Кристины'),('featured_video','Видео Кристины'),('product_video','Видео товара'),('description','Описание'),('buy','Купить'),('cart','Корзина'),('checkout','Checkout'),('pvz','Выбрали ПВЗ'),('payment_start','Начали оплату'),('paid','Подтверждённая оплата')]:
                 lines.append(title+' — '+number(data['counts'][k]))
             lines.append('Фото 1 / 2+ / 5+: '+' / '.join(number(data['photos_unique_visitors'][str(n)]) for n in (1,2,5)))
             for k,title in [('no_reviews','Без открытия отзывов'),('reviews','Отзывы'),('photos','Фото'),('review_video','Видео отзывов'),('featured','Кристина'),('product_video','Видео товара')]:
-                c=data['cohorts'][k];lines.append(title+': '+number(c['sessions'])+' визитов · Buy '+percent(c['buy_rate'])+' · PAID '+percent(c['paid_rate']))
+                c=data['cohorts'][k];lines.append(title+': '+number(c['sessions'])+' визитов · Buy '+percent(c['buy_rate'])+' · PAID '+percent(c['paid_rate'])+' · '+c['quality'])
         lines+=['Новые review-события учитываются после установки. Cohort — наблюдение, не доказательство причинности.']
     elif command=='organic':lines=source_view(r,True)
     elif command=='profit':lines=economy(r,True)

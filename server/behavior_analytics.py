@@ -26,7 +26,7 @@ def summary(events,sessions):
             label=='RSYA' and source(g['s'])['primary_attribution']=='PAID_RSYA']
         def names(g):return {e['name'] for e in g['events']}
         stages={'visitors':len(gs)}
-        for k,es in {'reviews':{'REVIEWS_OPEN'},'photos':{'REVIEW_PHOTO_OPEN','REVIEW_PHOTO_NEXT','REVIEW_PHOTO_PREV'},'review_video':{'REVIEW_VIDEO_PLAY'},'featured_video':{'FEATURED_REVIEW_VIDEO_PLAY'},'product_video':{'VIDEO_PLAY'},'description':{'DESCRIPTION_DRAWER_OPEN'},'buy':{'BUY_BUTTON_CLICK'},'cart':{'CART_OPEN'},'checkout':{'CHECKOUT_OPEN'},'paid':{'PAYMENT_SUCCESS'}}.items():
+        for k,es in {'reviews_block':{'REVIEWS_BLOCK_VIEW'},'reviews':{'REVIEWS_OPEN'},'photos':{'REVIEW_PHOTO_OPEN','REVIEW_PHOTO_NEXT','REVIEW_PHOTO_PREV'},'review_video':{'REVIEW_VIDEO_PLAY'},'featured':{'FEATURED_REVIEW_VIEW','FEATURED_REVIEW_EXPAND','FEATURED_REVIEW_VIDEO_PLAY'},'featured_video':{'FEATURED_REVIEW_VIDEO_PLAY'},'product_video':{'VIDEO_PLAY'},'description':{'DESCRIPTION_DRAWER_OPEN'},'buy':{'BUY_BUTTON_CLICK'},'cart':{'CART_OPEN'},'checkout':{'CHECKOUT_OPEN'},'pvz':{'PVZ_SELECTED'},'payment_start':{'PAYMENT_STARTED'},'paid':{'PAYMENT_SUCCESS'}}.items():
             stages[k]=sum(bool(names(g)&es) for g in gs)
         photo_counts=[]
         for g in gs:
@@ -47,7 +47,7 @@ def summary(events,sessions):
                 after=min(starts) if starts else None
                 buy+=any(e['name']=='BUY_BUTTON_CLICK' and (after is None or e['occurred_at']>=after) for e in g['events'])
                 paid+=any(e['name']=='PAYMENT_SUCCESS' and (after is None or e['occurred_at']>=after) for e in g['events'])
-            n=len(selected);cohorts[key]={'sessions':n,'buy':buy,'paid':paid,'buy_rate':round(100*buy/n,2) if n else None,'paid_rate':round(100*paid/n,2) if n else None}
+            n=len(selected);cohorts[key]={'sessions':n,'buy':buy,'paid':paid,'buy_rate':round(100*buy/n,2) if n else None,'paid_rate':round(100*paid/n,2) if n else None,'quality':'LOW SAMPLE' if n<20 else 'OBSERVATIONAL'}
         result[label]={'counts':stages,'photos_unique_visitors':{str(n):sum(c>=n for c in photo_counts) for n in (1,2,5)},'cohorts':cohorts,'quality':'LOW SAMPLE' if len(gs)<20 else 'OBSERVATIONAL'}
     return result
 

@@ -6,6 +6,14 @@ from behavior_analytics import summary,traffic
 from traffic_attribution import source_report
 
 class BehaviorTests(unittest.TestCase):
+ def test_required_stages_and_sparse_cohort_quality(self):
+  sessions=[{'session_id':str(i),'attribution':{}} for i in range(25)]
+  now=datetime.now(timezone.utc)
+  events=[{'session_id':'0','name':n,'occurred_at':now,'payload':{}} for n in ('REVIEWS_BLOCK_VIEW','FEATURED_REVIEW_VIEW','PVZ_SELECTED','PAYMENT_STARTED')]
+  r=summary(events,sessions)['ALL']
+  for k in ('reviews_block','featured','pvz','payment_start'):self.assertEqual(r['counts'][k],1)
+  self.assertEqual(r['cohorts']['featured']['quality'],'LOW SAMPLE')
+  self.assertEqual(r['quality'],'OBSERVATIONAL')
  def test_unknown_and_direct_are_not_free_and_unknown_paid_is_paid(self):
   sessions=[{'session_id':str(i),'attribution':a} for i,a in enumerate([{}, {'utm_source':'unexpected'},{'yclid':'123'}, {'utm_source':'telegram','utm_campaign':'content_engine'}])]
   t=traffic(source_report(sessions,[]));self.assertEqual((t['business_visits'],t['paid'],t['free'],t['direct_unknown']),(4,1,1,2))
