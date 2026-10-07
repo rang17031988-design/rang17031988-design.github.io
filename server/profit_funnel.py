@@ -22,12 +22,13 @@ import profit_presentation as presentation
 import traffic_attribution
 import posting_controls
 import wordstat_demand
+import cps_accounting
 from product_catalog import COGS_UNIT_RUB
 
 MSK = ZoneInfo('Europe/Moscow')
 UTC = timezone.utc
 COMMANDS = 'today yesterday week funnel organic devices browsers speed ads profit orders returns stock errors status cpa cpa_pause cpa_resume'.split() + posting_controls.COMMANDS
-CLIENT_EVENTS = set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CART_OPEN CART_QUANTITY_CHANGED CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
+CLIENT_EVENTS = set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW AFFILIATE_TOUCH BUY_BUTTON_CLICK CART_OPEN CART_QUANTITY_CHANGED CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
 STAGES = 'SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CART_OPEN CHECKOUT_OPEN CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_LOADED PVZ_SELECTED PAYMENT_STARTED PAYMENT_SUCCESS ORDER_RECEIVED'.split()
 ATTR_KEYS = 'yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()
 ATTR_KEYS += [f'{side}_{field}' for side in ('first','last') for field in ('source','medium','campaign','content','term','yclid','referrer_host')]
@@ -371,6 +372,7 @@ class ProfitFunnel:
             await c.execute("UPDATE profit_funnel_sessions SET traffic_class='unknown' WHERE NOT is_test AND NOT is_internal AND traffic_class='customer'")
             await c.execute("UPDATE profit_funnel_sessions SET traffic_class='internal_test' WHERE (is_test OR is_internal) AND traffic_class IN ('test','internal','owner_test')")
             await self.put(c,'owner_classification_v1',{'migrated':True,'unknown_history_preserved':True})
+        await cps_accounting.schema(c)
         self.ready=True
 
     async def ingest(self,batch,ua):
@@ -405,6 +407,9 @@ class ProfitFunnel:
                     result=await c.fetchval('''INSERT INTO profit_funnel_events(event_id,session_id,name,occurred_at,payload,origin)
                         VALUES($1,$2,$3,$4,$5::jsonb,'client') ON CONFLICT DO NOTHING RETURNING event_id''',eid,clean['session_id'],name,at,json.dumps(p))
                     accepted+=bool(result)
+                try:
+                    async with c.transaction():await cps_accounting.ingest_touch(c,clean)
+                except Exception as exc:self.status['cps_error']=type(exc).__name__
         return {'accepted':accepted}
 
     async def state(self,c,key):
@@ -781,6 +786,10 @@ class ProfitFunnel:
                     if locked:
                         try:
                             await self.observe(leader)
+                            try:
+                                await cps_accounting.sync(leader)
+                                self.status.pop('cps_error',None)
+                            except Exception as exc:self.status['cps_error']=type(exc).__name__
                             try:
                                 await self.drain()
                                 self.status.pop('transport_error',None)

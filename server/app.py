@@ -677,6 +677,41 @@ async def confirmed_return(body: ConfirmedReturnDisposition,x_internal_key: str 
             body.order_id,body.condition,body.not_picked_up,body.return_logistics,body.extra_cost,body.refund_rub)
     return {'ok':True,'order_id':body.order_id,'condition':body.condition}
 
+@app.get('/api/internal/cps/report', include_in_schema=False)
+async def cps_report(x_internal_key: str | None = Header(default=None)):
+    _operations_access(x_internal_key)
+    import cps_accounting
+    async with db.acquire() as c:
+        await cps_accounting.schema(c)
+        return await cps_accounting.report(c)
+
+
+class CPSRegistration(BaseModel):
+    affiliate_id: uuid.UUID | None = None
+
+
+@app.post('/api/internal/cps/sources', include_in_schema=False)
+async def cps_register(body:CPSRegistration,x_internal_key:str|None=Header(default=None)):
+    _operations_access(x_internal_key)
+    import cps_accounting
+    from urllib.parse import urlencode
+    affiliate_id=str(body.affiliate_id or uuid.uuid4());source_id=str(uuid.uuid4())
+    async with db.acquire() as c:
+        await cps_accounting.schema(c)
+        await c.execute("INSERT INTO cps_sources(source_id,affiliate_id,offer_version) VALUES($1,$2,$3)",source_id,affiliate_id,cps_accounting.POLICY['version'])
+    return {'affiliate_id':affiliate_id,'source_id':source_id,'status':'OWNER_REVIEW',
+        'url':'https://посуда163.рф/?'+urlencode({'utm_source':'affiliate','utm_medium':'cps','utm_campaign':'handles','utm_content':source_id})}
+
+
+@app.post('/api/internal/cps/sources/{source_id}/approve', include_in_schema=False)
+async def cps_source_approve(source_id:uuid.UUID,x_internal_key:str|None=Header(default=None)):
+    _operations_access(x_internal_key)
+    async with db.acquire() as c:
+        row=await c.fetchrow("UPDATE cps_sources SET status='ACTIVE' WHERE source_id=$1 AND status='OWNER_REVIEW' RETURNING affiliate_id",str(source_id))
+        if not row:raise HTTPException(409,'Existing owner-reviewed source required')
+    return {'source_id':str(source_id),'status':'ACTIVE','automatic_payout_enabled':False}
+
+
 @app.get('/api/internal/analytics/audit', include_in_schema=False)
 async def analytics_audit(x_internal_key: str | None = Header(default=None)):
     import hmac
@@ -1648,6 +1683,17 @@ async def _sync_post_purchase():
             async with db.acquire() as c:
                 await c.execute('''UPDATE commerce_pending_orders SET tracking_number=$2,ozon_status=$3,
                     status_checked_at=NOW(),post_purchase_failures=0 WHERE order_id=$1''',row['order_id'],tracking,status)
+                try:
+                    import cps_accounting
+                    await cps_accounting.schema(c)
+                    await cps_accounting.record_receipt(c,row,postings)
+                    if _profit_controller:
+                        await cps_accounting.verify_return_window(c,row,
+                            lambda payment_id:_yookassa_read('payments/'+str(uuid.UUID(payment_id)),INTERNAL_KEY),
+                            _profit_controller.actual_returns)
+                except Exception as cps_error:
+                    import logging
+                    logging.warning('CPS receipt evidence unavailable: %s',type(cps_error).__name__)
                 await c.execute("INSERT INTO commerce_service_messages(order_id,kind) VALUES($1,'paid_email') ON CONFLICT DO NOTHING",row['order_id'])
                 if status in ('in_delivery_point','ready_for_pickup'):
                     await c.execute("INSERT INTO commerce_service_messages(order_id,kind,milestone) VALUES($1,'ready_email','delivery_point') ON CONFLICT DO NOTHING",row['order_id'])
