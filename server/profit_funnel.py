@@ -23,12 +23,14 @@ import traffic_attribution
 import posting_controls
 import wordstat_demand
 import cps_accounting
+import behavior_analytics
 from product_catalog import COGS_UNIT_RUB
 
 MSK = ZoneInfo('Europe/Moscow')
 UTC = timezone.utc
 COMMANDS = 'today yesterday week funnel organic devices browsers speed ads profit orders returns stock errors status cpa cpa_pause cpa_resume'.split() + posting_controls.COMMANDS
 CLIENT_EVENTS = set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW AFFILIATE_TOUCH BUY_BUTTON_CLICK CART_OPEN CART_QUANTITY_CHANGED CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
+CLIENT_EVENTS |= behavior_analytics.EVENTS
 STAGES = 'SITE_SESSION PRODUCT_VIEW BUY_BUTTON_CLICK CART_OPEN CHECKOUT_OPEN CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_LOADED PVZ_SELECTED PAYMENT_STARTED PAYMENT_SUCCESS ORDER_RECEIVED'.split()
 ATTR_KEYS = 'yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword'.split()
 ATTR_KEYS += [f'{side}_{field}' for side in ('first','last') for field in ('source','medium','campaign','content','term','yclid','referrer_host')]
@@ -114,6 +116,15 @@ def safe_client(batch, ua, now=None):
                 if isinstance(raw,bool) or not isinstance(raw,(float,int)) or not math.isfinite(raw) or not 0<=raw<=limit: raise ValueError('video_metric')
                 p[key]=raw
         if e.get('video_view_id') is not None: p['video_view_id']=str(uuid.UUID(e['video_view_id']))
+        if e.get('review_id') is not None:
+            if not re.fullmatch(r'wb497049795-[0-9]{12}|review-[0-9]{1,6}',str(e['review_id'])):raise ValueError('review_id')
+            p['review_id']=e['review_id']
+        for k in ('media_index','count'):
+            if k in e:
+                if type(e[k]) is not int or not 0<=e[k]<=10000:raise ValueError('review_count')
+                p[k]=e[k]
+        if 'featured_review' in e:p['featured_review']=e['featured_review'] is True
+        if e.get('source_store')=='IP_ALEKSEEVA_LV':p['source_store']=e['source_store']
         if e.get('metric') in ('LCP','INP','CLS','TTFB'): p['metric'] = e['metric']
         if e.get('error_code') in ('NETWORK','TIMEOUT','HTTP','JS','RENDER','PAYMENT','OZON','EMAIL'): p['error_code'] = e['error_code']
         # Paths are fixed page categories, never checkout keys or URLs.
@@ -566,7 +577,7 @@ class ProfitFunnel:
             for s in sessions:
                 attr=value(s.get('attribution')) or {}
                 source=traffic_attribution.classify(attr,attr.get('referrer_host',''))
-                if (source['paid_evidence'] if label=='PAID' else not source['paid_evidence'] and source['primary_attribution']!='UNKNOWN'):
+                if (source['paid_evidence'] if label=='PAID' else not source['paid_evidence'] and source['primary_attribution'] in behavior_analytics.FREE):
                     selected.append(s)
             slices[label]=funnel(events,selected)
         channels={}
@@ -588,6 +599,7 @@ class ProfitFunnel:
                 'day_not_finished':period=='today','generated_at':now.isoformat(),'ads':ads,'metrika':metric,
                 'instrumented_funnel':f,'economics':economics,'channel_attribution':channels,
                 'source_attribution':traffic_attribution.source_report(sessions,rows),
+                'behavior_funnel':behavior_analytics.summary(events,sessions),
                 'funnel_slices':slices, 'wordstat_demand':demand,
                 'stock':stock,'controller_actions':actions,'technical':{'service_messages':failures,'shipment_failures':shipment_failures,
                     'verification_errors':verification_errors,'status_sync_stale':status_sync_errors,
@@ -596,6 +608,7 @@ class ProfitFunnel:
                 'traffic_exclusions':{'owner':sum(s.get('traffic_class')=='owner' for s in sessions),'internal_test':sum(s.get('traffic_class')=='internal_test' for s in sessions),'unknown':sum(s.get('traffic_class')=='unknown' for s in sessions)},
                 'collection_started':'profit_funnel instrumentation release; earlier missing events UNKNOWN, never zero',
                 'estimated_lost_revenue':None,'estimated_lost_revenue_reason':'requires sufficient comparable baseline'}
+        result['traffic']=behavior_analytics.traffic(result['source_attribution'])
         async with self.pool.acquire() as c:
             baseline=await c.fetch('''SELECT payload FROM profit_funnel_reports WHERE period='yesterday'
                 AND start_at >= $1 AND start_at < $2 ORDER BY start_at''',start-timedelta(days=7),start)

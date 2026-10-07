@@ -331,14 +331,26 @@ def customer_operations(r):
     return lines
 
 def source_view(r, organic=False):
+    if organic:
+        t=r.get('traffic')
+        if t is None:return ['👥 ТРАФИК',UNKNOWN]
+        labels={'ORGANIC_SEARCH':'🔎 Organic Search','TELEGRAM_OWNED':'✈️ Telegram owned','TELEGRAM_EXTERNAL':'📢 Telegram external','DZEN_ORGANIC':'📝 Дзен','REFERRAL_OTHER':'🔗 Other referral'}
+        lines=['👥 ТРАФИК','Всего business visits: '+number(t['business_visits']),
+            '💰 Платный: '+number(t['paid']),'🌱 Бесплатный: '+number(t['free']),
+            '🔗 Direct / Unknown: '+number(t['direct_unknown']),'','🌱 БЕСПЛАТНЫЙ ТРАФИК']
+        for k,label in labels.items():lines.append(label+' — '+number(t['free_breakdown'].get(k,0)))
+        for k,label in [('OK_ORGANIC','ОК (на паузе)'),('BLUESKY_ORGANIC','Bluesky (на паузе)')]:
+            if t['free_breakdown'].get(k):lines.append(label+' — '+number(t['free_breakdown'][k]))
+        return lines+['Только измеренные business-визиты; Direct/Unknown не относится к бесплатному трафику.']
     names={'PAID_SEARCH':'Поиск Direct','PAID_RSYA':'РСЯ','ORGANIC_SEARCH':'Органический поиск',
         'TELEGRAM_OWNED':'Telegram: собственный канал','TELEGRAM_EXTERNAL':'Telegram: внешние группы',
-        'DZEN_ORGANIC':'Дзен','PINTEREST_ORGANIC':'Pinterest','OK_ORGANIC':'ОК',
+        'DZEN_ORGANIC':'Дзен','OK_ORGANIC':'ОК',
         'BLUESKY_ORGANIC':'Bluesky','REFERRAL_OTHER':'Другие переходы','DIRECT':'Прямые визиты','UNKNOWN':'Неизвестный источник'}
     lines=['🌱 ОРГАНИКА' if organic else '🏷 ИСТОЧНИКИ']
     groups=r.get('source_attribution',{})
     if not groups:return lines+[UNKNOWN]
     for key,e in groups.items():
+        if key=='PINTEREST_ORGANIC':continue
         if organic and key in ('PAID_SEARCH','PAID_RSYA','UNKNOWN','OWNER','INTERNAL_TEST'):continue
         lines += ['',names.get(key,key)+': '+number(e['sessions'])+' визитов',
             'Оплаты: '+number(e['paid'])+' • выручка: '+rub(e['revenue']),
@@ -351,6 +363,7 @@ def render(r,command,worker=None):
     if command=='menu':return '\n'.join(['📊 ПУЛЬТ ВЛАДЕЛЬЦА','Выберите период или раздел.','🔒 Доступ только владельцу.'])
     if command in ('today','yesterday','week'):
         lines=sales(r)+['',SEP]+advertising(r)+['',SEP]+economy(r)+['',SEP]+attention(r)
+        lines+=['',SEP]+source_view(r,True)
         totals=r.get('metrika',{}).get('devices',{}).get('totals') or []
         lines.insert(0,'👥 Визиты Метрики: '+number(totals[0] if totals else None))
         lines += ['', '🛠 Технические проблемы: '+('⚠️ Есть зарегистрированные ошибки — откройте раздел ниже.' if any(r['instrumented_funnel']['errors'].values()) or r['technical']['shipment_failures'] or r['technical']['status_sync_stale'] or any(v['state']=='failed' for v in r['technical']['service_messages']) else 'В доступных источниках не зарегистрированы.'), '🧭 Полная воронка: '+number(r['instrumented_funnel']['sessions'])+' измеренных сессий','🔎 Подробности — по кнопкам ниже.']
@@ -359,6 +372,14 @@ def render(r,command,worker=None):
         for label,f in r.get('funnel_slices',{}).items():
             lines += ['',label+' • '+number(f['sessions'])+' сессий',
                 'Купить / checkout / PAID: '+' / '.join(number(f['counts'].get(k)) for k in ('BUY_BUTTON_CLICK','CHECKOUT_OPEN','PAYMENT_SUCCESS'))]
+        for label,data in r.get('behavior_funnel',{}).items():
+            lines+=['',SEP,'👥 ПОВЕДЕНИЕ · '+label]
+            for k,title in [('visitors','Посетители'),('reviews','Открыли отзывы'),('photos','Фото отзывов'),('review_video','Видео отзывов'),('featured_video','Видео Кристины'),('product_video','Видео товара'),('description','Описание'),('buy','Купить'),('cart','Корзина'),('checkout','Checkout'),('paid','Подтверждённая оплата')]:
+                lines.append(title+' — '+number(data['counts'][k]))
+            lines.append('Фото 1 / 2+ / 5+: '+' / '.join(number(data['photos_unique_visitors'][str(n)]) for n in (1,2,5)))
+            for k,title in [('no_reviews','Без открытия отзывов'),('reviews','Отзывы'),('photos','Фото'),('review_video','Видео отзывов'),('featured','Кристина'),('product_video','Видео товара')]:
+                c=data['cohorts'][k];lines.append(title+': '+number(c['sessions'])+' визитов · Buy '+percent(c['buy_rate'])+' · PAID '+percent(c['paid_rate']))
+        lines+=['Новые review-события учитываются после установки. Cohort — наблюдение, не доказательство причинности.']
     elif command=='organic':lines=source_view(r,True)
     elif command=='profit':lines=economy(r,True)
     elif command=='ads':lines=advertising(r,True)

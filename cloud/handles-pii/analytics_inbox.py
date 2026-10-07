@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 
 ORIGIN='https://xn--163-5cdt3dgrs.xn--p1ai'
 CLIENT_EVENTS=set('VIDEO_CTA_VIEW VIDEO_OPEN VIDEO_PLAY VIDEO_PAUSE VIDEO_25 VIDEO_50 VIDEO_75 VIDEO_COMPLETE VIDEO_CLOSE SITE_SESSION PRODUCT_VIEW AFFILIATE_TOUCH BUY_BUTTON_CLICK CART_OPEN CART_QUANTITY_CHANGED CHECKOUT_OPEN CONTACTS_STARTED CONTACTS_COMPLETED PVZ_PICKER_OPEN PVZ_SEARCH PVZ_LOADED PVZ_SELECTED PAYMENT_BUTTON_CLICK SCROLL_25 SCROLL_50 SCROLL_75 SCROLL_90 PRODUCT_GALLERY_INTERACTION REVIEWS_VIEW SESSION_TIMING WEB_VITAL JS_ERROR PVZ_ERROR PVZ_TIMEOUT PAYMENT_ERROR'.split())
+CLIENT_EVENTS.update('REVIEWS_BLOCK_VIEW REVIEWS_OPEN REVIEWS_CLOSE REVIEWS_SCROLL_25 REVIEWS_SCROLL_50 REVIEWS_SCROLL_75 REVIEWS_SCROLL_100 REVIEWS_ITEMS_VIEWED REVIEW_PHOTO_OPEN REVIEW_PHOTO_NEXT REVIEW_PHOTO_PREV REVIEW_PHOTO_CLOSE REVIEW_VIDEO_OPEN REVIEW_VIDEO_PLAY REVIEW_VIDEO_PAUSE REVIEW_VIDEO_25 REVIEW_VIDEO_50 REVIEW_VIDEO_75 REVIEW_VIDEO_COMPLETE REVIEW_VIDEO_CLOSE FEATURED_REVIEW_VIEW FEATURED_REVIEW_EXPAND FEATURED_REVIEW_VIDEO_PLAY FEATURED_REVIEW_VIDEO_25 FEATURED_REVIEW_VIDEO_50 FEATURED_REVIEW_VIDEO_75 FEATURED_REVIEW_VIDEO_COMPLETE DESCRIPTION_DRAWER_OPEN DESCRIPTION_DRAWER_CLOSE DESCRIPTION_BUY_CLICK'.split())
 ATTR_KEYS=set('yclid client_id utm_source utm_medium utm_campaign utm_content utm_term source_token ad_group keyword referrer_host'.split())
 ATTR_KEYS.update(f'{side}_{field}' for side in ('first','last') for field in ('source','medium','campaign','content','term','yclid','referrer_host'))
 
@@ -29,9 +30,14 @@ def ingest(event,execute):
         for e in data.get('events',[]):
             uuid.UUID(e['event_id'])
             if e['name'] not in CLIENT_EVENTS:raise ValueError()
-            if set(e)-{'event_id','name','timestamp','elapsed_ms','duration_sec','value','metric','error_code','page','video_view_id','video_watch_seconds','video_duration_seconds','video_completion_percent'}:raise ValueError()
+            if set(e)-{'event_id','name','timestamp','elapsed_ms','duration_sec','value','metric','error_code','page','video_view_id','video_watch_seconds','video_duration_seconds','video_completion_percent','review_id','media_index','source_store','featured_review','count'}:raise ValueError()
         if set(data.get('attribution') or {})-ATTR_KEYS:raise ValueError()
         for e in data.get('events',[]):
+            if 'review_id' in e and not re.fullmatch(r'wb497049795-[0-9]{12}|review-[0-9]{1,6}',str(e['review_id'])):raise ValueError()
+            if 'source_store' in e and e['source_store']!='IP_ALEKSEEVA_LV':raise ValueError()
+            if 'featured_review' in e and type(e['featured_review']) is not bool:raise ValueError()
+            for k in ('media_index','count'):
+                if k in e and (type(e[k]) is not int or not 0<=e[k]<=10000):raise ValueError()
             for key in ('elapsed_ms','duration_sec','value'):
                 if key in e:
                     n=float(e[key])

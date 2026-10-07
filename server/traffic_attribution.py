@@ -27,8 +27,8 @@ def classify(a=None, referrer='', traffic_class='customer'):
         name={'714566814':'PAID_SEARCH','715029848':'PAID_RSYA'}.get(campaign,'UNKNOWN')
     elif source in ('telegram','tg'):
         name={'content_engine':'TELEGRAM_OWNED','external_groups':'TELEGRAM_EXTERNAL'}.get(campaign,'UNKNOWN')
-    elif source in ('dzen','zen','pinterest','ok','odnoklassniki','bluesky','bsky') and medium=='organic':
-        name={'dzen':'DZEN_ORGANIC','zen':'DZEN_ORGANIC','pinterest':'PINTEREST_ORGANIC',
+    elif source in ('dzen','zen','ok','odnoklassniki','bluesky','bsky') and medium=='organic':
+        name={'dzen':'DZEN_ORGANIC','zen':'DZEN_ORGANIC',
             'ok':'OK_ORGANIC','odnoklassniki':'OK_ORGANIC','bluesky':'BLUESKY_ORGANIC','bsky':'BLUESKY_ORGANIC'}[source]
     else:
         host=urlsplit(referrer if '://' in referrer else '//'+referrer).hostname or ''
@@ -57,7 +57,10 @@ def source_report(sessions,orders):
         if s.get('is_test') or s.get('is_internal') or s.get('traffic_class','customer')!='customer':continue
         a=s.get('attribution') or {}
         if isinstance(a,str):a=json.loads(a)
-        entry(classify(a,a.get('referrer_host',''))['primary_attribution'])['sessions']+=1
+        classified=classify(a,a.get('referrer_host',''))
+        name=classified['primary_attribution']
+        if classified['paid_evidence'] and name=='UNKNOWN':name='UNKNOWN_PAID'
+        entry(name)['sessions']+=1
     for r in orders:
         if r.get('is_test') or r.get('is_internal'):continue
         a=r.get('attribution') or {}
